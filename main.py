@@ -218,6 +218,8 @@ class Game:
         self.visited_pose = set()
         self.prev_action_idx = 0
         self.recent_cells = deque(maxlen=200)
+        self.episode_steps = 0
+        self._start_new_episode()
 
     def _find_open_spot(self) -> Tuple[float, float]:
         for _ in range(2000):
@@ -312,6 +314,8 @@ class Game:
         avg_open, lr_bias = self._openness(ray_hits)
 
         if self.control_mode == "nn":
+            if self.storage is not None and len(self.storage.rewards) == 0 and self.ppo_agent:
+                self.ppo_agent.reset_hidden()
             obs_vec = self._build_feature_vector(ray_hits, tactile_codes, avg_open, lr_bias, stall_norm)
             if self.ppo_agent is None:
                 obs_size = len(obs_vec)
@@ -341,7 +345,7 @@ class Game:
         # Reward shaping
         reward = 0.0
         reward += (energy_after - energy_before) * 0.05
-        reward += dist_moved * 0.08  # encourage exploration
+        reward += dist_moved * 0.05  # encourage exploration
         # Penalize failed translation only if trying to move (not just turning)
         translating = any(keys[k] for k in (pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d))
         if dist_moved == 0 and translating:
@@ -358,6 +362,19 @@ class Game:
             self.seen_obs.add(obs_sig)
         if pose_new:
             reward += settings.NEW_POSE_REWARD * stall_factor
+
+        # Recent loop penalty to avoid tight oscillations
+        cell = (int(self.player.pos.x // self.cell_size), int(self.player.pos.y // self.cell_size))
+        recent_hits = sum(1 for c in self.recent_cells if c == cell)
+        self.recent_cells.append(cell)
+        reward -= 0.02 * recent_hits
+
+        self.episode_steps += 1
+        if fruit_gained or self.episode_steps >= settings.EPISODE_HORIZON:
+            done = True
+            next_feats = None
+            self._respawn_player()
+            self.episode_steps = 0
 
         # Coverage bonus
         if self._mark_visited(self.player.pos):
@@ -397,6 +414,8 @@ class Game:
             next_feats = None
             self._respawn_player()
             self.stall_steps = 0
+            if self.ppo_agent:
+                self.ppo_agent.reset_hidden()
 
         # Straight-line penalty if not improving
         heading_delta = abs((self.player.angle - self.last_angle + 180) % 360 - 180)
@@ -413,6 +432,8 @@ class Game:
             done = True
             next_feats = None
             self._respawn_player()
+            if self.ppo_agent:
+                self.ppo_agent.reset_hidden()
 
         # Turning bonus when stuck
         angle_delta = abs((self.player.angle - self.last_angle + 180) % 360 - 180)
@@ -446,14 +467,17 @@ class Game:
                 returns, advantages = self.storage.compute_advantages(last_value)
                 storage_dict = {
                     "obs": torch.stack(self.storage.obs).unsqueeze(0),  # (1,T,obs)
-                    "actions": torch.tensor(self.storage.actions).unsqueeze(0),
-                    "logprobs": torch.stack(self.storage.logprobs).unsqueeze(0),
-                    "returns": torch.tensor(returns).unsqueeze(0),
-                    "advantages": torch.tensor(advantages).unsqueeze(0),
+                    "actions": torch.tensor(self.storage.actions).long().unsqueeze(0),
+                    "logprobs": torch.tensor(self.storage.logprobs).unsqueeze(0),
+                    "returns": returns.unsqueeze(0),
+                    "advantages": advantages.unsqueeze(0),
                 }
                 self.ppo_agent.update(storage_dict)
                 self.storage.reset()
+                self.ppo_agent.reset_hidden()
             self.prev_action_idx = action_idx
+            if done and self.ppo_agent:
+                self.ppo_agent.reset_hidden()
         return ray_hits
 
     def _nearest_fruit_dist(self, ray_hits):
@@ -478,6 +502,17 @@ class Game:
         right_open = sum(d for _, _, d in ray_hits[-third:])
         lr_bias = (right_open - left_open) / (right_open + left_open + 1e-6)
         return avg_open, lr_bias
+
+    def _start_new_episode(self):
+        self.seen_obs.clear()
+        self.visited_pose.clear()
+        self.recent_cells.clear()
+        self.stall_steps = 0
+        self.straight_steps = 0
+        self.prev_move = Vec2(0, 0)
+        self.prev_action_idx = 0
+        if self.ppo_agent:
+            self.ppo_agent.reset_hidden()
 
     def _nearest_fruit_world(self, pos: Vec2):
         # World-distance to closest ripe bush
@@ -520,6 +555,7 @@ class Game:
         self.player.pos = Vec2(self._find_open_spot())
         self.player.energy = settings.ENERGY_MAX
         self.player.angle = random.uniform(0, 360)
+        self._start_new_episode()
 
     def _render(self, ray_hits):
         # Drawing

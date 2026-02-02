@@ -51,9 +51,10 @@ ROLLOUT_STEPS = 256
 PPO_EPOCHS = 4
 PPO_CLIP = 0.2
 PPO_VALUE_COEF = 0.5
-PPO_ENTROPY_COEF = 0.01
+PPO_ENTROPY_COEF = 0.03
 PPO_MAX_GRAD_NORM = 0.5
 LAMBDA = 0.95
+EPISODE_HORIZON = 2000
 
 # Fast simulation
 FAST_STEPS = 6  # physics/learning steps per render when fast mode enabled

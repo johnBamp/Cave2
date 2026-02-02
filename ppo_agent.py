@@ -47,6 +47,9 @@ class PPOAgent:
     def act(self, obs_tensor: torch.Tensor, explore: bool = True):
         obs_tensor = obs_tensor.unsqueeze(0).unsqueeze(0)  # (1,1,obs)
         logits, value, self.hidden = self.model(obs_tensor, self.hidden)
+        # Detach hidden to prevent graph from spanning entire history
+        h, c = self.hidden
+        self.hidden = (h.detach(), c.detach())
         logits = logits.squeeze(0).squeeze(0)
         value = value.squeeze(0).squeeze(0)
         dist = torch.distributions.Categorical(logits=logits)
@@ -108,22 +111,28 @@ class RolloutStorage:
 
     def add(self, obs, action, logprob, reward, done, value):
         self.obs.append(obs)
-        self.actions.append(action)
-        self.logprobs.append(logprob)
-        self.rewards.append(reward)
-        self.dones.append(done)
-        self.values.append(value)
+        self.actions.append(int(action))
+        self.logprobs.append(float(logprob))
+        self.rewards.append(float(reward))
+        self.dones.append(bool(done))
+        self.values.append(float(value))
 
-    def compute_advantages(self, last_value):
-        T = len(self.rewards)
-        advantages = [0] * T
-        returns = [0] * T
+    def compute_advantages(self, last_value: float):
+        rewards = torch.tensor(self.rewards, dtype=torch.float32)
+        dones = torch.tensor(self.dones, dtype=torch.float32)
+        values = torch.tensor(self.values, dtype=torch.float32)
+
+        T = rewards.shape[0]
+        advantages = torch.zeros(T, dtype=torch.float32)
+        returns = torch.zeros(T, dtype=torch.float32)
         gae = 0.0
         for t in reversed(range(T)):
-            mask = 1.0 - float(self.dones[t])
-            next_value = last_value if t == T - 1 else self.values[t + 1]
-            delta = self.rewards[t] + settings.GAMMA * next_value * mask - self.values[t]
+            mask = 1.0 - dones[t].item()
+            next_value = last_value if t == T - 1 else values[t + 1].item()
+            delta = rewards[t].item() + settings.GAMMA * next_value * mask - values[t].item()
             gae = delta + settings.GAMMA * settings.LAMBDA * mask * gae
             advantages[t] = gae
-            returns[t] = gae + self.values[t]
+            returns[t] = gae + values[t]
+
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         return returns, advantages
