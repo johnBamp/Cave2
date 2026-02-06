@@ -26,6 +26,7 @@ GRID = cfg.GRID_COLOR
 BLACK = cfg.BLACK
 PLAYER_COLOR = cfg.PLAYER_COLOR
 UNKNOWN_FILL = cfg.UNKNOWN_FILL
+TARGET_COLOR = cfg.TARGET_COLOR
 
 # Raycast
 FOV_DEG = cfg.FOV_DEG
@@ -37,6 +38,8 @@ VISION_RANGE = cfg.VISION_RANGE
 ROT_SPEED = math.radians(cfg.ROT_SPEED_DEG)
 MOVE_SPEED = cfg.MOVE_SPEED
 PLAYER_RADIUS = TILE_SIZE * cfg.PLAYER_RADIUS_RATIO
+WAYPOINT_EPS = TILE_SIZE * cfg.WAYPOINT_EPS_RATIO
+STUCK_FRAMES = cfg.STUCK_FRAMES
 
 # Cave generation
 FILL_PROB = cfg.FILL_PROB
@@ -86,6 +89,13 @@ def world_to_cell(px, py):
 
 def cell_center(cx, cy):
     return (cx + 0.5) * TILE_SIZE, (cy + 0.5) * TILE_SIZE
+
+
+def rotate_toward(current, target, max_delta):
+    diff = (target - current + math.pi) % (2 * math.pi) - math.pi
+    if abs(diff) <= max_delta:
+        return target
+    return current + max_delta * (1 if diff > 0 else -1)
 
 
 # -------------------- Cave Generation --------------------
@@ -297,8 +307,8 @@ def is_confirmed_wall(cx, cy):
     return ever_seen[cx][cy] and subjective[cx][cy] >= WALL_CONF_THRESH
 
 
-def is_confirmed_empty(cx, cy):
-    return ever_seen[cx][cy] and subjective[cx][cy] <= (1.0 - WALL_CONF_THRESH)
+def is_known_open(cx, cy):
+    return ever_seen[cx][cy] and subjective[cx][cy] < WALL_CONF_THRESH
 
 
 def infer_enclosed_voids():
@@ -307,7 +317,7 @@ def infer_enclosed_voids():
 
     for gx in range(tilesX):
         for gy in range(tilesY):
-            if is_confirmed_empty(gx, gy) and not visited[gx][gy]:
+            if is_known_open(gx, gy) and not visited[gx][gy]:
                 visited[gx][gy] = True
                 q.append((gx, gy))
 
@@ -382,43 +392,25 @@ def can_move_to(px, py):
     return True
 
 
-def move_player(pos, angle, dt, keys):
-    vx = 0.0
-    vy = 0.0
+def move_toward(pos, target_pos, dt):
+    dx = target_pos[0] - pos[0]
+    dy = target_pos[1] - pos[1]
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return pos
 
-    forward_x = math.cos(angle)
-    forward_y = math.sin(angle)
-    strafe_x = -forward_y
-    strafe_y = forward_x
+    vx = dx / dist
+    vy = dy / dist
+    step_x = vx * MOVE_SPEED * dt
+    step_y = vy * MOVE_SPEED * dt
 
-    if keys[pygame.K_w]:
-        vx += forward_x
-        vy += forward_y
-    if keys[pygame.K_s]:
-        vx -= forward_x
-        vy -= forward_y
-    if keys[pygame.K_a]:
-        vx += strafe_x
-        vy += strafe_y
-    if keys[pygame.K_d]:
-        vx -= strafe_x
-        vy -= strafe_y
-
-    length = math.hypot(vx, vy)
-    if length > 0:
-        vx /= length
-        vy /= length
-
-    dx = vx * MOVE_SPEED * dt
-    dy = vy * MOVE_SPEED * dt
-
-    new_x = pos[0] + dx
+    new_x = pos[0] + step_x
     new_y = pos[1]
     if can_move_to(new_x, new_y):
         pos = (new_x, new_y)
 
     new_x = pos[0]
-    new_y = pos[1] + dy
+    new_y = pos[1] + step_y
     if can_move_to(new_x, new_y):
         pos = (new_x, new_y)
 
@@ -427,6 +419,63 @@ def move_player(pos, angle, dt, keys):
         clamp(pos[1], TILE_SIZE, WORLD_H - TILE_SIZE),
     )
     return pos
+
+
+def bfs_reachable(start):
+    dist = [[-1 for _ in range(tilesY)] for _ in range(tilesX)]
+    parent = [[None for _ in range(tilesY)] for _ in range(tilesX)]
+    q = deque()
+    dist[start[0]][start[1]] = 0
+    q.append(start)
+
+    while q:
+        x, y = q.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if not in_bounds_cell(nx, ny):
+                continue
+            if is_confirmed_wall(nx, ny):
+                continue
+            if dist[nx][ny] == -1:
+                dist[nx][ny] = dist[x][y] + 1
+                parent[nx][ny] = (x, y)
+                q.append((nx, ny))
+    return dist, parent
+
+
+def reconstruct_path(parent, start, goal):
+    if start == goal:
+        return [start]
+    if parent[goal[0]][goal[1]] is None:
+        return []
+    path = [goal]
+    cur = goal
+    while cur != start:
+        cur = parent[cur[0]][cur[1]]
+        if cur is None:
+            return []
+        path.append(cur)
+    path.reverse()
+    return path
+
+
+def pick_frontier(dist, target_cell):
+    best = None
+    best_score = None
+    for gx in range(tilesX):
+        for gy in range(tilesY):
+            if dist[gx][gy] == -1:
+                continue
+            if ever_seen[gx][gy]:
+                continue
+            if target_cell is None:
+                score = dist[gx][gy]
+            else:
+                score = dist[gx][gy] + abs(gx - target_cell[0]) + abs(gy - target_cell[1])
+            if best_score is None or score < best_score:
+                best_score = score
+                best = (gx, gy)
+    return best
 
 
 # -------------------- Rendering --------------------
@@ -466,6 +515,16 @@ def draw_world(screen, cam_x, cam_y, seen_cells):
                 pygame.draw.rect(screen, PLAYER_COLOR, rect, 2)
 
 
+def draw_target(screen, target_cell, cam_x, cam_y):
+    if target_cell is None:
+        return
+    gx, gy = target_cell
+    sx = int(gx * TILE_SIZE - cam_x)
+    sy = int(gy * TILE_SIZE - cam_y)
+    rect = pygame.Rect(sx, sy, TILE_SIZE, TILE_SIZE)
+    pygame.draw.rect(screen, TARGET_COLOR, rect, 2)
+
+
 # -------------------- Main --------------------
 
 def reset_belief():
@@ -502,6 +561,9 @@ def main():
     spawn_cell = find_spawn_cell(main_region, rng, clearance=SPAWN_CLEARANCE)
     player_pos = cell_center(*spawn_cell)
     player_angle = 0.0
+    target_cell = None
+    search_state = "idle"
+    stuck_frames = 0
 
     clock = pygame.time.Clock()
     running = True
@@ -524,14 +586,56 @@ def main():
                 spawn_cell = find_spawn_cell(main_region, rng, clearance=SPAWN_CLEARANCE)
                 player_pos = cell_center(*spawn_cell)
                 player_angle = 0.0
+                target_cell = None
+                search_state = "idle"
+                stuck_frames = 0
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                cam_x = clamp(player_pos[0] - WIDTH / 2, 0, WORLD_W - WIDTH)
+                cam_y = clamp(player_pos[1] - HEIGHT / 2, 0, WORLD_H - HEIGHT)
+                world_x = cam_x + event.pos[0]
+                world_y = cam_y + event.pos[1]
+                cx, cy = world_to_cell(world_x, world_y)
+                if in_bounds_cell(cx, cy):
+                    target_cell = (cx, cy)
+                    search_state = "searching"
+                    stuck_frames = 0
 
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_q]:
-            player_angle -= ROT_SPEED * dt
-        if keys[pygame.K_e]:
-            player_angle += ROT_SPEED * dt
+        current_cell = world_to_cell(player_pos[0], player_pos[1])
+        path = []
+        if target_cell is not None and search_state not in ("reached", "unreachable"):
+            if current_cell == target_cell and not is_wall_cell(*target_cell):
+                search_state = "reached"
+            elif is_confirmed_wall(target_cell[0], target_cell[1]) and ever_seen[target_cell[0]][target_cell[1]]:
+                search_state = "unreachable"
+            else:
+                dist, parent = bfs_reachable(current_cell)
+                if dist[target_cell[0]][target_cell[1]] != -1:
+                    path = reconstruct_path(parent, current_cell, target_cell)
+                else:
+                    frontier = pick_frontier(dist, target_cell)
+                    if frontier is not None:
+                        path = reconstruct_path(parent, current_cell, frontier)
+                    else:
+                        search_state = "unreachable"
 
-        player_pos = move_player(player_pos, player_angle, dt, keys)
+        if path and len(path) > 1:
+            next_cell = path[1]
+            target_pos = cell_center(next_cell[0], next_cell[1])
+            desired_angle = math.atan2(target_pos[1] - player_pos[1], target_pos[0] - player_pos[0])
+            player_angle = rotate_toward(player_angle, desired_angle, ROT_SPEED * dt)
+
+            prev_pos = player_pos
+            if math.hypot(target_pos[0] - player_pos[0], target_pos[1] - player_pos[1]) > WAYPOINT_EPS:
+                player_pos = move_toward(player_pos, target_pos, dt)
+            moved = math.hypot(player_pos[0] - prev_pos[0], player_pos[1] - prev_pos[1]) > 1e-3
+            if moved:
+                stuck_frames = 0
+            else:
+                stuck_frames += 1
+                if stuck_frames >= STUCK_FRAMES:
+                    subjective[next_cell[0]][next_cell[1]] = 1.0
+                    ever_seen[next_cell[0]][next_cell[1]] = True
+                    stuck_frames = 0
 
         seen_cells = cast_and_update(player_pos, player_angle)
         infer_enclosed_voids()
@@ -541,6 +645,7 @@ def main():
 
         screen.fill(BLACK)
         draw_world(screen, cam_x, cam_y, seen_cells)
+        draw_target(screen, target_cell, cam_x, cam_y)
         draw_player(screen, player_pos, player_angle, cam_x, cam_y)
         pygame.display.flip()
 
