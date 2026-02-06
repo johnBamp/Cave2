@@ -1,135 +1,266 @@
 import pygame
 import sys
 import math
+import random
+from collections import deque
 
-pygame.init()
+import settings as cfg
 
-WIDTH, HEIGHT = 900, 900
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("AI Test")
+# Window
+WIDTH, HEIGHT = cfg.WIDTH, cfg.HEIGHT
+screen = None
 
-GRID = (120, 120, 120)
-BLACK = (0, 0, 0)
-
-SEEN_EMPTY_FILL = (40, 40, 100)   # blue-ish (empty)
-SEEN_WALL_FILL = (255, 255, 255)  # white (wall)
-PLAYER_COLOR = (240, 240, 0)
-
-tilesX = 9
-tilesY = 9
-
-tileWidth = WIDTH // tilesX
-tileHeight = HEIGHT // tilesY
+# World
+tilesX = cfg.TILES_X
+tilesY = cfg.TILES_Y
+TILE_SIZE = cfg.TILE_SIZE
+WORLD_W = tilesX * TILE_SIZE
+WORLD_H = tilesY * TILE_SIZE
 
 # Cell types
 EMPTY = 0
 WALL = 1
 
-def clamp01(x: float) -> float:
-    return 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
+# Colors
+GRID = cfg.GRID_COLOR
+BLACK = cfg.BLACK
+PLAYER_COLOR = cfg.PLAYER_COLOR
+UNKNOWN_FILL = cfg.UNKNOWN_FILL
 
-def lerp(a, b, t: float):
-    return a + (b - a) * t
+# Raycast
+FOV_DEG = cfg.FOV_DEG
+RAYS = cfg.RAYS
+STEP = cfg.RAY_STEP
+VISION_RANGE = cfg.VISION_RANGE
 
-def lerp_color(c0, c1, t: float):
-    t = clamp01(t)
-    return (
-        int(lerp(c0[0], c1[0], t)),
-        int(lerp(c0[1], c1[1], t)),
-        int(lerp(c0[2], c1[2], t)),
-    )
+# Movement
+ROT_SPEED = math.radians(cfg.ROT_SPEED_DEG)
+MOVE_SPEED = cfg.MOVE_SPEED
+PLAYER_RADIUS = TILE_SIZE * cfg.PLAYER_RADIUS_RATIO
 
-class Cell:
-    def __init__(self, gx, gy, cell_type=EMPTY):
-        self.gx = gx
-        self.gy = gy
-        self.type = cell_type  # objective reality
+# Cave generation
+FILL_PROB = cfg.FILL_PROB
+SMOOTH_PASSES = cfg.SMOOTH_PASSES
+SMOOTH_WALL_THRESHOLD = cfg.SMOOTH_WALL_THRESHOLD
+SMOOTH_EMPTY_THRESHOLD = cfg.SMOOTH_EMPTY_THRESHOLD
+MIN_REGION_SIZE = cfg.MIN_REGION_SIZE
+FINAL_SMOOTH_PASSES = cfg.FINAL_SMOOTH_PASSES
+NOISE_WALL_PROB = cfg.NOISE_WALL_PROB
+NOISE_PASSES = cfg.NOISE_PASSES
+CORRIDOR_RADIUS = cfg.CORRIDOR_RADIUS
+SPAWN_CLEARANCE = cfg.SPAWN_CLEARANCE
 
-    @property
-    def rect(self):
-        return pygame.Rect(self.gx * tileWidth, self.gy * tileHeight, tileWidth, tileHeight)
+# Belief update
+EMPTY_ALPHA = cfg.EMPTY_ALPHA
+WALL_ALPHA = cfg.WALL_ALPHA
+WALL_CONF_THRESH = cfg.WALL_CONF_THRESH
+MIN_ENCLOSED_SIZE = cfg.MIN_ENCLOSED_SIZE
 
-    def draw(self, ever_seen: bool, belief_wall: float):
-        r = self.rect
+# World state
+objective = []  # objective[gx][gy]
+subjective = []  # belief in [0,1]
+ever_seen = []  # boolean
 
-        # Always draw grid outline
-        pygame.draw.rect(screen, GRID, r, 1)
 
-        # If agent has never seen this cell, don't fill it (unknown to the agent)
-        if not ever_seen:
-            return
+# -------------------- Utilities --------------------
 
-        # Subjective reality rendering: blend between empty-blue and wall-white
-        fill = lerp_color(SEEN_EMPTY_FILL, SEEN_WALL_FILL, belief_wall)
-        pygame.draw.rect(screen, fill, r)
-        pygame.draw.rect(screen, GRID, r, 1)
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-cellList = []
 
-objective = []   # objective[gx][gy] -> Cell (objective reality)
-subjective = []  # subjective[gx][gy] in [0,1], probability of WALL (subjective reality)
-
-ever_seen = set()  # cells the agent has ever observed via rays (memory of "seen")
-
-def initCells():
-    global objective, subjective, ever_seen
-    cellList.clear()
-    ever_seen.clear()
-
-    objective = [[None for _ in range(tilesY)] for _ in range(tilesX)]
-    subjective = [[0.5 for _ in range(tilesY)] for _ in range(tilesX)]  # unknown everywhere initially
-
-    for gx in range(tilesX):
-        for gy in range(tilesY):
-            # Objective world: border walls
-            is_border = (gx == 0 or gy == 0 or gx == tilesX - 1 or gy == tilesY - 1)
-            ctype = WALL if is_border else EMPTY
-            cell = Cell(gx, gy, ctype)
-            objective[gx][gy] = cell
-            cellList.append(cell)
-
-def world_to_cell(px, py):
-    cx = int(px // tileWidth)
-    cy = int(py // tileHeight)
-    return cx, cy
-
-def in_bounds(cx, cy):
+def in_bounds_cell(cx, cy):
     return 0 <= cx < tilesX and 0 <= cy < tilesY
 
-def update_subjective_cell(cx, cy, target, alpha):
-    """Move subjective[cx][cy] toward target (0=empty, 1=wall)."""
-    subjective[cx][cy] = clamp01(subjective[cx][cy] + alpha * (target - subjective[cx][cy]))
+
+def is_wall_cell(cx, cy):
+    if not in_bounds_cell(cx, cy):
+        return True
+    return objective[cx][cy] == WALL
+
+
+def world_to_cell(px, py):
+    cx = int(px // TILE_SIZE)
+    cy = int(py // TILE_SIZE)
+    return cx, cy
+
+
+def cell_center(cx, cy):
+    return (cx + 0.5) * TILE_SIZE, (cy + 0.5) * TILE_SIZE
+
+
+# -------------------- Cave Generation --------------------
+
+def count_wall_neighbors(grid, cx, cy):
+    count = 0
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            nx, ny = cx + dx, cy + dy
+            if not (0 <= nx < tilesX and 0 <= ny < tilesY):
+                count += 1
+            elif grid[nx][ny] == WALL:
+                count += 1
+    return count
+
+
+def smooth_grid(grid, wall_threshold, empty_threshold):
+    new_grid = [[WALL for _ in range(tilesY)] for _ in range(tilesX)]
+    for gx in range(1, tilesX - 1):
+        for gy in range(1, tilesY - 1):
+            walls = count_wall_neighbors(grid, gx, gy)
+            if walls >= wall_threshold:
+                new_grid[gx][gy] = WALL
+            elif walls <= empty_threshold:
+                new_grid[gx][gy] = EMPTY
+            else:
+                new_grid[gx][gy] = grid[gx][gy]
+
+    for gx in range(tilesX):
+        new_grid[gx][0] = WALL
+        new_grid[gx][tilesY - 1] = WALL
+    for gy in range(tilesY):
+        new_grid[0][gy] = WALL
+        new_grid[tilesX - 1][gy] = WALL
+    return new_grid
+
+
+def sprinkle_walls(grid, rng, prob):
+    for gx in range(1, tilesX - 1):
+        for gy in range(1, tilesY - 1):
+            if grid[gx][gy] == EMPTY and rng.random() < prob:
+                grid[gx][gy] = WALL
+
+
+def get_empty_regions(grid):
+    visited = [[False for _ in range(tilesY)] for _ in range(tilesX)]
+    regions = []
+    for gx in range(1, tilesX - 1):
+        for gy in range(1, tilesY - 1):
+            if visited[gx][gy] or grid[gx][gy] == WALL:
+                continue
+            region = []
+            q = deque()
+            q.append((gx, gy))
+            visited[gx][gy] = True
+            while q:
+                x, y = q.popleft()
+                region.append((x, y))
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < tilesX and 0 <= ny < tilesY:
+                        if not visited[nx][ny] and grid[nx][ny] == EMPTY:
+                            visited[nx][ny] = True
+                            q.append((nx, ny))
+            regions.append(region)
+    return regions
+
+
+def carve_tunnel(grid, start, end, radius):
+    x, y = start
+    ex, ey = end
+
+    def carve_at(cx, cy):
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if abs(dx) + abs(dy) > radius:
+                    continue
+                nx, ny = cx + dx, cy + dy
+                if 0 < nx < tilesX - 1 and 0 < ny < tilesY - 1:
+                    grid[nx][ny] = EMPTY
+
+    while x != ex:
+        carve_at(x, y)
+        x += 1 if ex > x else -1
+    while y != ey:
+        carve_at(x, y)
+        y += 1 if ey > y else -1
+    carve_at(ex, ey)
+
+
+def connect_regions(grid, regions, rng):
+    if not regions:
+        return []
+    largest = max(regions, key=len)
+    others = [r for r in regions if r is not largest]
+    for region in others:
+        start = rng.choice(region)
+        end = min(largest, key=lambda p: abs(p[0] - start[0]) + abs(p[1] - start[1]))
+        carve_tunnel(grid, start, end, CORRIDOR_RADIUS)
+    return largest
+
+
+def generate_cave(seed):
+    rng = random.Random(seed)
+    grid = [[WALL for _ in range(tilesY)] for _ in range(tilesX)]
+
+    for gx in range(1, tilesX - 1):
+        for gy in range(1, tilesY - 1):
+            grid[gx][gy] = WALL if rng.random() < FILL_PROB else EMPTY
+
+    for i in range(SMOOTH_PASSES):
+        if i < SMOOTH_PASSES // 2:
+            grid = smooth_grid(grid, SMOOTH_WALL_THRESHOLD, SMOOTH_EMPTY_THRESHOLD)
+        else:
+            grid = smooth_grid(grid, SMOOTH_WALL_THRESHOLD, SMOOTH_EMPTY_THRESHOLD + 1)
+
+    regions = get_empty_regions(grid)
+    for region in regions:
+        if len(region) < MIN_REGION_SIZE:
+            for (x, y) in region:
+                grid[x][y] = WALL
+
+    regions = get_empty_regions(grid)
+    if not regions:
+        return generate_cave(seed + 1)
+
+    main_region = connect_regions(grid, regions, rng)
+
+    for _ in range(NOISE_PASSES):
+        sprinkle_walls(grid, rng, NOISE_WALL_PROB)
+        grid = smooth_grid(grid, SMOOTH_WALL_THRESHOLD, SMOOTH_EMPTY_THRESHOLD + 1)
+
+    regions = get_empty_regions(grid)
+    if regions:
+        main_region = connect_regions(grid, regions, rng)
+
+    for _ in range(FINAL_SMOOTH_PASSES):
+        grid = smooth_grid(grid, SMOOTH_WALL_THRESHOLD, SMOOTH_EMPTY_THRESHOLD + 1)
+
+    for gx in range(tilesX):
+        grid[gx][0] = WALL
+        grid[gx][tilesY - 1] = WALL
+    for gy in range(tilesY):
+        grid[0][gy] = WALL
+        grid[tilesX - 1][gy] = WALL
+
+    regions = get_empty_regions(grid)
+    if not regions:
+        return generate_cave(seed + 2)
+    main_region = max(regions, key=len)
+
+    # Fill any fully enclosed empty regions (no path to main cave)
+    for region in regions:
+        if region is main_region:
+            continue
+        for (x, y) in region:
+            grid[x][y] = WALL
+
+    return grid, main_region
+
+
+# -------------------- Perception --------------------
 
 def cast_and_update(player_pos, player_angle_rad):
-    """
-    Fan of rays forward.
-
-    For each ray:
-      - cells before the first wall hit => evidence EMPTY (target 0)
-      - first wall cell hit => evidence WALL (target 1)
-      - beyond wall => no evidence
-
-    Returns:
-      current_visible: set of cells intersected this frame (optional UI)
-    """
-    current_visible = set()
-
-    FOV_DEG = 60
-    RAYS = 121
-    STEP = 4  # pixels per step
-
-    # learning rate for subjective updates (bigger => faster convergence)
-    ALPHA = 0.35
+    seen_empty = set()
+    seen_wall = set()
 
     half_fov = math.radians(FOV_DEG) / 2
     start_angle = player_angle_rad - half_fov
     end_angle = player_angle_rad + half_fov
 
-    max_dist = int(math.hypot(WIDTH, HEIGHT)) + 10
-    steps = max_dist // STEP
-
-    # Aggregate evidence per frame so many rays don't over-update the same cell
-    evidence = {}
+    max_dist = min(VISION_RANGE, int(math.hypot(WORLD_W, WORLD_H)) + 10)
+    steps = int(max_dist // STEP)
 
     for i in range(RAYS):
         t = i / (RAYS - 1) if RAYS > 1 else 0.5
@@ -138,101 +269,284 @@ def cast_and_update(player_pos, player_angle_rad):
         dy = math.sin(ang)
 
         x, y = player_pos
-        ray_cells = []
-        hit_wall_cell = None
-
         for _ in range(steps):
             x += dx * STEP
             y += dy * STEP
-
             cx, cy = world_to_cell(x, y)
-            if not in_bounds(cx, cy):
+            if not in_bounds_cell(cx, cy):
                 break
+            if objective[cx][cy] == WALL:
+                seen_wall.add((cx, cy))
+                break
+            seen_empty.add((cx, cy))
 
-            # avoid repeating the same cell as we step within it
-            if ray_cells and ray_cells[-1] == (cx, cy):
+    for (cx, cy) in seen_empty:
+        subjective[cx][cy] += (0.0 - subjective[cx][cy]) * EMPTY_ALPHA
+        ever_seen[cx][cy] = True
+
+    for (cx, cy) in seen_wall:
+        subjective[cx][cy] += (1.0 - subjective[cx][cy]) * WALL_ALPHA
+        ever_seen[cx][cy] = True
+
+    return seen_empty | seen_wall
+
+
+def is_confirmed_wall(cx, cy):
+    if cx == 0 or cy == 0 or cx == tilesX - 1 or cy == tilesY - 1:
+        return True
+    return ever_seen[cx][cy] and subjective[cx][cy] >= WALL_CONF_THRESH
+
+
+def is_confirmed_empty(cx, cy):
+    return ever_seen[cx][cy] and subjective[cx][cy] <= (1.0 - WALL_CONF_THRESH)
+
+
+def infer_enclosed_voids():
+    visited = [[False for _ in range(tilesY)] for _ in range(tilesX)]
+    q = deque()
+
+    for gx in range(tilesX):
+        for gy in range(tilesY):
+            if is_confirmed_empty(gx, gy) and not visited[gx][gy]:
+                visited[gx][gy] = True
+                q.append((gx, gy))
+
+    while q:
+        x, y = q.popleft()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if in_bounds_cell(nx, ny) and not visited[nx][ny] and not is_confirmed_wall(nx, ny):
+                visited[nx][ny] = True
+                q.append((nx, ny))
+
+    for gx in range(1, tilesX - 1):
+        for gy in range(1, tilesY - 1):
+            if is_confirmed_wall(gx, gy) or visited[gx][gy]:
                 continue
+            region = []
+            dq = deque()
+            dq.append((gx, gy))
+            visited[gx][gy] = True
+            while dq:
+                x, y = dq.popleft()
+                region.append((x, y))
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if in_bounds_cell(nx, ny) and not visited[nx][ny] and not is_confirmed_wall(nx, ny):
+                        visited[nx][ny] = True
+                        dq.append((nx, ny))
 
-            current_visible.add((cx, cy))
-            ray_cells.append((cx, cy))
+            if len(region) >= MIN_ENCLOSED_SIZE:
+                for (x, y) in region:
+                    subjective[x][y] = 1.0
+                    ever_seen[x][y] = True
 
-            cell = objective[cx][cy]
-            if cell.type == WALL:
-                hit_wall_cell = (cx, cy)
+
+# -------------------- Spawn --------------------
+
+def find_spawn_cell(region, rng, clearance=2):
+    candidates = region[:]
+    rng.shuffle(candidates)
+    for (cx, cy) in candidates:
+        ok = True
+        for dx in range(-clearance, clearance + 1):
+            for dy in range(-clearance, clearance + 1):
+                nx, ny = cx + dx, cy + dy
+                if not in_bounds_cell(nx, ny) or objective[nx][ny] == WALL:
+                    ok = False
+                    break
+            if not ok:
                 break
+        if ok:
+            return cx, cy
+    return candidates[0]
 
-        # Convert the ray into logical facts:
-        # - all cells before hit are empty
-        # - hit cell is wall
-        if hit_wall_cell is not None:
-            for (cx, cy) in ray_cells:
-                ever_seen.add((cx, cy))
-                if (cx, cy) == hit_wall_cell:
-                    evidence.setdefault((cx, cy), []).append(1.0)
-                else:
-                    evidence.setdefault((cx, cy), []).append(0.0)
-        else:
-            # If no wall was hit: all traversed cells are empty evidence
-            for (cx, cy) in ray_cells:
-                ever_seen.add((cx, cy))
-                evidence.setdefault((cx, cy), []).append(0.0)
 
-    # Apply aggregated subjective updates once per frame
-    for (cx, cy), targets in evidence.items():
-        target = sum(targets) / len(targets)
-        update_subjective_cell(cx, cy, target, ALPHA)
+# -------------------- Movement --------------------
 
-    return current_visible
+def can_move_to(px, py):
+    checks = [
+        (PLAYER_RADIUS, 0),
+        (-PLAYER_RADIUS, 0),
+        (0, PLAYER_RADIUS),
+        (0, -PLAYER_RADIUS),
+        (PLAYER_RADIUS, PLAYER_RADIUS),
+        (-PLAYER_RADIUS, PLAYER_RADIUS),
+        (PLAYER_RADIUS, -PLAYER_RADIUS),
+        (-PLAYER_RADIUS, -PLAYER_RADIUS),
+    ]
+    for ox, oy in checks:
+        cx, cy = world_to_cell(px + ox, py + oy)
+        if is_wall_cell(cx, cy):
+            return False
+    return True
 
-def drawPlayer(pos, angle_rad):
-    px, py = int(pos[0]), int(pos[1])
-    pygame.draw.circle(screen, PLAYER_COLOR, (px, py), 10)
 
+def move_player(pos, angle, dt, keys):
+    vx = 0.0
+    vy = 0.0
+
+    forward_x = math.cos(angle)
+    forward_y = math.sin(angle)
+    strafe_x = -forward_y
+    strafe_y = forward_x
+
+    if keys[pygame.K_w]:
+        vx += forward_x
+        vy += forward_y
+    if keys[pygame.K_s]:
+        vx -= forward_x
+        vy -= forward_y
+    if keys[pygame.K_a]:
+        vx += strafe_x
+        vy += strafe_y
+    if keys[pygame.K_d]:
+        vx -= strafe_x
+        vy -= strafe_y
+
+    length = math.hypot(vx, vy)
+    if length > 0:
+        vx /= length
+        vy /= length
+
+    dx = vx * MOVE_SPEED * dt
+    dy = vy * MOVE_SPEED * dt
+
+    new_x = pos[0] + dx
+    new_y = pos[1]
+    if can_move_to(new_x, new_y):
+        pos = (new_x, new_y)
+
+    new_x = pos[0]
+    new_y = pos[1] + dy
+    if can_move_to(new_x, new_y):
+        pos = (new_x, new_y)
+
+    pos = (
+        clamp(pos[0], TILE_SIZE, WORLD_W - TILE_SIZE),
+        clamp(pos[1], TILE_SIZE, WORLD_H - TILE_SIZE),
+    )
+    return pos
+
+
+# -------------------- Rendering --------------------
+
+def draw_player(screen, pos, angle, cam_x, cam_y):
+    px = int(pos[0] - cam_x)
+    py = int(pos[1] - cam_y)
+    pygame.draw.circle(screen, PLAYER_COLOR, (px, py), int(PLAYER_RADIUS))
     length = 40
-    fx = px + int(math.cos(angle_rad) * length)
-    fy = py + int(math.sin(angle_rad) * length)
+    fx = px + int(math.cos(angle) * length)
+    fy = py + int(math.sin(angle) * length)
     pygame.draw.line(screen, PLAYER_COLOR, (px, py), (fx, fy), 3)
 
-def renderSubjective():
-    for cell in cellList:
-        p_wall = subjective[cell.gx][cell.gy]
-        cell.draw(
-            ever_seen=((cell.gx, cell.gy) in ever_seen),
-            belief_wall=p_wall
-        )
-    drawPlayer(player_pos, player_angle)
 
-# --- Setup ---
-initCells()
+def draw_world(screen, cam_x, cam_y, seen_cells):
+    start_x = max(0, int(cam_x // TILE_SIZE))
+    end_x = min(tilesX - 1, int((cam_x + WIDTH) // TILE_SIZE) + 1)
+    start_y = max(0, int(cam_y // TILE_SIZE))
+    end_y = min(tilesY - 1, int((cam_y + HEIGHT) // TILE_SIZE) + 1)
 
-player_pos = (WIDTH / 2, HEIGHT / 2)
-player_angle = 0.0
+    for gx in range(start_x, end_x + 1):
+        for gy in range(start_y, end_y + 1):
+            sx = int(gx * TILE_SIZE - cam_x)
+            sy = int(gy * TILE_SIZE - cam_y)
+            rect = pygame.Rect(sx, sy, TILE_SIZE, TILE_SIZE)
 
-running = True
-clock = pygame.time.Clock()
-ROT_SPEED = math.radians(120)
+            if ever_seen[gx][gy]:
+                v = int(clamp(subjective[gx][gy], 0.0, 1.0) * 255)
+                fill = (v, v, v)
+            else:
+                fill = UNKNOWN_FILL
 
-while running:
-    dt = clock.tick(60) / 1000.0
+            pygame.draw.rect(screen, fill, rect)
+            pygame.draw.rect(screen, GRID, rect, 1)
 
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            running = False
+            if (gx, gy) in seen_cells:
+                pygame.draw.rect(screen, PLAYER_COLOR, rect, 2)
 
-    keys = pygame.key.get_pressed()
-    if keys[pygame.K_q]:
-        player_angle -= ROT_SPEED * dt
-    if keys[pygame.K_e]:
-        player_angle += ROT_SPEED * dt
 
-    # Raycast and update subjective reality (subjective map)
-    current_visible = cast_and_update(player_pos, player_angle)
+# -------------------- Main --------------------
 
-    screen.fill(BLACK)
-    renderSubjective()
-    pygame.display.flip()
+def reset_belief():
+    global subjective, ever_seen
+    subjective = [[0.5 for _ in range(tilesY)] for _ in range(tilesX)]
+    ever_seen = [[False for _ in range(tilesY)] for _ in range(tilesX)]
 
-pygame.quit()
-sys.exit()
+
+def build_world(seed):
+    global objective
+    objective, main_region = generate_cave(seed)
+    reset_belief()
+    return main_region
+
+
+def parse_seed():
+    if len(sys.argv) > 1:
+        try:
+            return int(sys.argv[1])
+        except ValueError:
+            return random.randrange(1 << 30)
+    return random.randrange(1 << 30)
+
+
+def main():
+    pygame.init()
+    global screen
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("AI Test")
+
+    current_seed = parse_seed()
+    rng = random.Random(current_seed)
+    main_region = build_world(current_seed)
+    spawn_cell = find_spawn_cell(main_region, rng, clearance=SPAWN_CLEARANCE)
+    player_pos = cell_center(*spawn_cell)
+    player_angle = 0.0
+
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        dt = clock.tick(60) / 1000.0
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                if len(sys.argv) > 1:
+                    current_seed += 1
+                else:
+                    current_seed = random.randrange(1 << 30)
+                rng = random.Random(current_seed)
+                main_region = build_world(current_seed)
+                spawn_cell = find_spawn_cell(main_region, rng, clearance=SPAWN_CLEARANCE)
+                player_pos = cell_center(*spawn_cell)
+                player_angle = 0.0
+
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_q]:
+            player_angle -= ROT_SPEED * dt
+        if keys[pygame.K_e]:
+            player_angle += ROT_SPEED * dt
+
+        player_pos = move_player(player_pos, player_angle, dt, keys)
+
+        seen_cells = cast_and_update(player_pos, player_angle)
+        infer_enclosed_voids()
+
+        cam_x = clamp(player_pos[0] - WIDTH / 2, 0, WORLD_W - WIDTH)
+        cam_y = clamp(player_pos[1] - HEIGHT / 2, 0, WORLD_H - HEIGHT)
+
+        screen.fill(BLACK)
+        draw_world(screen, cam_x, cam_y, seen_cells)
+        draw_player(screen, player_pos, player_angle, cam_x, cam_y)
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+
+
+if __name__ == "__main__":
+    main()
