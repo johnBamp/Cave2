@@ -40,6 +40,8 @@ MOVE_SPEED = cfg.MOVE_SPEED
 PLAYER_RADIUS = TILE_SIZE * cfg.PLAYER_RADIUS_RATIO
 WAYPOINT_EPS = TILE_SIZE * cfg.WAYPOINT_EPS_RATIO
 STUCK_FRAMES = cfg.STUCK_FRAMES
+NO_NEW_FRAMES = cfg.NO_NEW_FRAMES
+NO_PROGRESS_FRAMES = cfg.NO_PROGRESS_FRAMES
 
 # Cave generation
 FILL_PROB = cfg.FILL_PROB
@@ -632,12 +634,11 @@ def pick_cluster_representative(cluster, dist, avoid=None):
     # return best
 
 
-def pick_exploration_target(current_cell):
+def pick_exploration_target_from_dist(current_cell, dist):
     """
-    Compute reachable space and pick a frontier-cluster representative.
+    Pick a frontier-cluster representative from a precomputed dist grid.
     Returns a target_cell or None.
     """
-    dist, parent = bfs_reachable(current_cell)
     clusters = find_frontier_clusters(dist)
     if not clusters:
         return None
@@ -764,6 +765,10 @@ def main():
     scan_target_angle = None
     last_move_angle = None
     last_blocked_cell = None
+    last_target_cell = None
+    last_target_dist = None
+    frames_no_new = 0
+    frames_no_progress = 0
 
     clock = pygame.time.Clock()
     running = True
@@ -864,6 +869,10 @@ def main():
                 scan_target_angle = None
                 last_move_angle = None
                 last_blocked_cell = None
+                last_target_cell = None
+                last_target_dist = None
+                frames_no_new = 0
+                frames_no_progress = 0
 
                 # refresh known space after reset
                 seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
@@ -886,11 +895,19 @@ def main():
                     scan_goal = None
                     scan_target_angle = None
                     last_blocked_cell = None
+                    last_target_cell = None
+                    last_target_dist = None
+                    frames_no_new = 0
+                    frames_no_progress = 0
 
         # -------------------- Perception FIRST (so frontiers exist) --------------------
         seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
         infer_enclosed_voids()
         sense_touch(player_pos)
+        if newly_seen > 0:
+            frames_no_new = 0
+        else:
+            frames_no_new += 1
 
         current_cell = world_to_cell(player_pos[0], player_pos[1])
 
@@ -898,12 +915,11 @@ def main():
         ever_seen[current_cell[0]][current_cell[1]] = True
         subjective[current_cell[0]][current_cell[1]] = min(subjective[current_cell[0]][current_cell[1]], 0.0)
 
-        dist_known = None
+        dist_known, parent_known = bfs_known_open(current_cell)
         is_scanning = scan_remaining > 0.0
         half_fov = math.radians(FOV_DEG) / 2.0
 
         if is_scanning:
-            dist_known, _ = bfs_known_open(current_cell)
             if find_frontier_clusters(dist_known):
                 scan_remaining = 0.0
                 is_scanning = False
@@ -931,9 +947,38 @@ def main():
         if not is_scanning and search_state == "scanning":
             search_state = "idle"
 
+        # -------------------- Progress Tracking --------------------
+        if target_cell != last_target_cell:
+            last_target_cell = target_cell
+            last_target_dist = None
+            frames_no_progress = 0
+
+        if target_cell is None:
+            last_target_dist = None
+            frames_no_progress = 0
+        else:
+            dist_to_target = dist_known[target_cell[0]][target_cell[1]]
+            if dist_to_target == -1:
+                frames_no_progress += 1
+            else:
+                if last_target_dist is None or dist_to_target < last_target_dist:
+                    frames_no_progress = 0
+                else:
+                    frames_no_progress += 1
+                last_target_dist = dist_to_target
+
+        if (not is_scanning) and (frames_no_new >= NO_NEW_FRAMES or frames_no_progress >= NO_PROGRESS_FRAMES):
+            target_cell = None
+            search_state = "unreachable"
+            start_scan("stale")
+            if scan_remaining > 0.0:
+                search_state = "scanning"
+            frames_no_new = 0
+            frames_no_progress = 0
+
         # -------------------- Auto Exploration Trigger --------------------
         if (not is_scanning) and (target_cell is None or search_state in ("idle", "reached", "unreachable")):
-            exp = pick_exploration_target(current_cell)
+            exp = pick_exploration_target_from_dist(current_cell, dist_known)
             if exp is not None:
                 target_cell = exp
                 search_state = "searching"
@@ -952,31 +997,27 @@ def main():
                 elif current_cell == target_cell and not is_wall_cell(*target_cell):
                     search_state = "reached"
                 else:
-                    # Compute reachable known-open space
-                    dist, parent = bfs_known_open(current_cell)
-                    dist_known = dist
-
                     # If target is NOT known-open, we can't plan to it directly.
                     # This happens when target is frontier rep but not yet "known-open" due to belief thresholds.
                     # So we plan to the nearest frontier rep that IS reachable.
-                    if dist[target_cell[0]][target_cell[1]] != -1:
-                        path = reconstruct_path(parent, current_cell, target_cell)
+                    if dist_known[target_cell[0]][target_cell[1]] != -1:
+                        path = reconstruct_path(parent_known, current_cell, target_cell)
                     else:
                         # Degrade to a reachable frontier-cluster representative
                         exp = None
 
                         # We need a dist grid for find_frontier_clusters to filter reachable frontier cells.
                         # But our bfs_known_open only visits known-open cells; that's exactly what we want.
-                        clusters = find_frontier_clusters(dist)
+                        clusters = find_frontier_clusters(dist_known)
                         if clusters:
-                            reps = [pick_cluster_representative(c, dist, avoid=current_cell) for c in clusters]
+                            reps = [pick_cluster_representative(c, dist_known, avoid=current_cell) for c in clusters]
                             # Only keep reps that are reachable in this BFS and not the current cell
-                            reps = [r for r in reps if r != current_cell and dist[r[0]][r[1]] != -1]
+                            reps = [r for r in reps if r != current_cell and dist_known[r[0]][r[1]] != -1]
                             if reps:
-                                exp = min(reps, key=lambda c: dist[c[0]][c[1]])
+                                exp = min(reps, key=lambda c: dist_known[c[0]][c[1]])
 
                         if exp is not None:
-                            path = reconstruct_path(parent, current_cell, exp)
+                            path = reconstruct_path(parent_known, current_cell, exp)
                         else:
                             search_state = "unreachable"
 
@@ -1027,11 +1068,7 @@ def main():
         draw_player(screen, player_pos, player_angle, cam_x, cam_y)
 
         # Optional: show frontier reps (yellow boxes) to debug exploration
-        if dist_known is None:
-            dist_dbg, _ = bfs_known_open(current_cell)
-        else:
-            dist_dbg = dist_known
-        draw_frontiers(screen, cam_x, cam_y, dist_dbg)
+        draw_frontiers(screen, cam_x, cam_y, dist_known)
 
         pygame.display.flip()
 
