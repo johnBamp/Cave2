@@ -372,14 +372,34 @@ def sense_touch(player_pos):
         (touch_r, -touch_r),
         (-touch_r, -touch_r),
     ]
-    touched = False
+    newly_touched = 0
     for ox, oy in offsets:
         cx, cy = world_to_cell(player_pos[0] + ox, player_pos[1] + oy)
         if in_bounds_cell(cx, cy) and objective[cx][cy] == WALL:
+            if not ever_seen[cx][cy]:
+                newly_touched += 1
             subjective[cx][cy] = 1.0
             ever_seen[cx][cy] = True
-            touched = True
-    return touched
+    return newly_touched
+
+
+def observe_local_3x3(current_cell):
+    """Assume the agent fills its cell and 'touches' all surrounding cells."""
+    newly_seen = 0
+    cx0, cy0 = current_cell
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            cx, cy = cx0 + dx, cy0 + dy
+            if not in_bounds_cell(cx, cy):
+                continue
+            if not ever_seen[cx][cy]:
+                newly_seen += 1
+            if objective[cx][cy] == WALL:
+                subjective[cx][cy] = 1.0
+            else:
+                subjective[cx][cy] = 0.0
+            ever_seen[cx][cy] = True
+    return newly_seen
 
 
 def score_unknown_cone(player_pos, angle, probe_rays=9):
@@ -769,6 +789,7 @@ def main():
     last_target_dist = None
     frames_no_new = 0
     frames_no_progress = 0
+    move_accum = 0.0
 
     clock = pygame.time.Clock()
     running = True
@@ -873,6 +894,7 @@ def main():
                 last_target_dist = None
                 frames_no_new = 0
                 frames_no_progress = 0
+                move_accum = 0.0
 
                 # refresh known space after reset
                 seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
@@ -899,11 +921,12 @@ def main():
                     last_target_dist = None
                     frames_no_new = 0
                     frames_no_progress = 0
+                    move_accum = 0.0
 
         # -------------------- Perception FIRST (so frontiers exist) --------------------
         seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
         infer_enclosed_voids()
-        sense_touch(player_pos)
+        newly_seen += observe_local_3x3(world_to_cell(player_pos[0], player_pos[1]))
         if newly_seen > 0:
             frames_no_new = 0
         else:
@@ -1021,7 +1044,7 @@ def main():
                         else:
                             search_state = "unreachable"
 
-        # -------------------- Movement --------------------
+        # -------------------- Movement (Discrete Steps) --------------------
         if (not is_scanning) and path and len(path) > 1:
             next_cell = path[1]
             target_pos = cell_center(next_cell[0], next_cell[1])
@@ -1033,27 +1056,35 @@ def main():
             last_move_angle = desired_angle
             player_angle = rotate_toward(player_angle, desired_angle, ROT_SPEED * dt)
 
-            prev_pos = player_pos
-            if math.hypot(target_pos[0] - player_pos[0], target_pos[1] - player_pos[1]) > WAYPOINT_EPS:
-                player_pos = move_toward(player_pos, target_pos, dt)
+            move_accum += dt
+            step_time = TILE_SIZE / max(1e-6, MOVE_SPEED)
+            attempted_move = False
+            moved = False
 
-            moved = math.hypot(player_pos[0] - prev_pos[0], player_pos[1] - prev_pos[1]) > 1e-3
-            if moved:
-                stuck_frames = 0
-                last_blocked_cell = None
-            else:
-                stuck_frames += 1
-                if stuck_frames >= STUCK_FRAMES:
-                    # Mark the next cell as blocked in belief so planning avoids it
-                    subjective[next_cell[0]][next_cell[1]] = 1.0
-                    ever_seen[next_cell[0]][next_cell[1]] = True
-                    last_blocked_cell = next_cell
+            if move_accum >= step_time:
+                move_accum -= step_time
+                attempted_move = True
+                if not is_wall_cell(next_cell[0], next_cell[1]):
+                    player_pos = target_pos
+                    moved = True
+
+            if attempted_move:
+                if moved:
                     stuck_frames = 0
-                    target_cell = None
-                    search_state = "unreachable"
-                    start_scan("stuck")
-                    if scan_remaining > 0.0:
-                        search_state = "scanning"
+                    last_blocked_cell = None
+                else:
+                    stuck_frames += 1
+                    if stuck_frames >= STUCK_FRAMES:
+                        # Mark the next cell as blocked in belief so planning avoids it
+                        subjective[next_cell[0]][next_cell[1]] = 1.0
+                        ever_seen[next_cell[0]][next_cell[1]] = True
+                        last_blocked_cell = next_cell
+                        stuck_frames = 0
+                        target_cell = None
+                        search_state = "unreachable"
+                        start_scan("stuck")
+                        if scan_remaining > 0.0:
+                            search_state = "scanning"
         elif not is_scanning:
             # Idle scan: rotate in place to reveal nearby space and seed frontiers.
             player_angle = (player_angle + ROT_SPEED * dt) % (2 * math.pi)
