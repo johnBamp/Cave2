@@ -78,6 +78,15 @@ class Config:
     animal_predict_max_sec: float
     animal_search_ring_step: int
     animal_search_bias_deg: float
+
+    # Sound
+    sound_enabled: bool
+    sound_range_tiles: int
+    sound_threshold: float
+    sound_turn_sec: float
+    sound_turn_speed_mult: float
+    animal_sound_level: float
+    sound_confidence: float
     hunt_weight: float
     hunt_eat_amount: float
     hunt_retarget_sec: float
@@ -180,6 +189,15 @@ def load_config() -> Config:
         animal_predict_max_sec=cfg.ANIMAL_PREDICT_MAX_SEC,
         animal_search_ring_step=cfg.ANIMAL_SEARCH_RING_STEP,
         animal_search_bias_deg=cfg.ANIMAL_SEARCH_BIAS_DEG,
+
+        # Sound
+        sound_enabled=cfg.SOUND_ENABLED,
+        sound_range_tiles=cfg.SOUND_RANGE_TILES,
+        sound_threshold=cfg.SOUND_THRESHOLD,
+        sound_turn_sec=cfg.SOUND_TURN_SEC,
+        sound_turn_speed_mult=cfg.SOUND_TURN_SPEED_MULT,
+        animal_sound_level=cfg.ANIMAL_SOUND_LEVEL,
+        sound_confidence=cfg.SOUND_CONFIDENCE,
         hunt_weight=cfg.HUNT_WEIGHT,
         hunt_eat_amount=cfg.HUNT_EAT_AMOUNT,
         hunt_retarget_sec=cfg.HUNT_RETARGET_SEC,

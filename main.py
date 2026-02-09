@@ -17,6 +17,7 @@ from grid import (
     is_confirmed_wall,
     is_wall_cell,
     is_known_open,
+    in_bounds_cell,
 )
 from movement import bfs_known_open, reconstruct_path
 from perception import cast_and_update, infer_enclosed_voids, observe_local_3x3
@@ -32,6 +33,7 @@ from exploration import (
 )
 from animals import update_animals, respawn_animal
 from rendering import draw_world, draw_player, draw_target, draw_frontiers, draw_animals
+from sound import emit_sound, process_hearing
 
 
 def parse_seed() -> int:
@@ -217,6 +219,12 @@ def main() -> None:
         state.game_time += dt
         state.hunger = min(cfg.hunger_max, state.hunger + cfg.hunger_decay_per_sec * dt)
         update_animals(cfg, state, dt, animals_rng, player_pos=state.player_pos)
+        state.sound_events.clear()
+        if cfg.sound_enabled:
+            for animal in state.animals:
+                if not animal.alive:
+                    continue
+                emit_sound(state, animal.pos, cfg.animal_sound_level, animal.id, "animal")
         update_fruit_respawn(cfg, state, state.game_time)
 
         if state.respawn_estimate_sec is None:
@@ -275,6 +283,12 @@ def main() -> None:
                     state.frames_no_progress = 0
                     state.move_accum = 0.0
                     state.last_harvest_cell = None
+
+        is_scanning = state.scan_remaining > 0.0
+        heard, sound_angle, sound_vol, sound_event = process_hearing(cfg, state, state.player_pos)
+        if heard and not is_scanning:
+            state.sound_target_angle = sound_angle
+            state.sound_turn_remaining = cfg.sound_turn_sec
 
         seen_cells, newly_seen = cast_and_update(cfg, state)
         infer_enclosed_voids(cfg, state)
@@ -338,7 +352,10 @@ def main() -> None:
                     mem.belief_last_update = state.game_time
                     pred_cell = world_to_cell(cfg, mem.belief_pos[0], mem.belief_pos[1])
                     max_proj = int(math.ceil(mem.belief_radius)) + 2
-                    if not is_known_open(cfg, state, pred_cell[0], pred_cell[1]):
+                    if not in_bounds_cell(cfg, pred_cell[0], pred_cell[1]):
+                        if mem.belief_cell is None:
+                            mem.belief_cell = mem.last_seen_cell
+                    elif not is_known_open(cfg, state, pred_cell[0], pred_cell[1]):
                         proj = project_to_known_open(cfg, state, pred_cell, max_proj)
                         if proj is not None:
                             mem.belief_cell = proj
@@ -346,6 +363,21 @@ def main() -> None:
                             mem.belief_cell = mem.last_seen_cell
                     else:
                         mem.belief_cell = pred_cell
+
+        if (
+            sound_event is not None
+            and sound_event.kind == "animal"
+            and sound_event.source_id is not None
+            and sound_event.source_id in state.animal_memory
+            and sound_event.source_id not in visible_animals
+        ):
+            mem = state.animal_memory[sound_event.source_id]
+            mem.belief_pos = sound_event.pos
+            mem.belief_cell = world_to_cell(cfg, sound_event.pos[0], sound_event.pos[1])
+            mem.belief_radius = max(mem.belief_radius, 1.0)
+            mem.belief_heading = sound_angle if sound_angle is not None else mem.belief_heading
+            mem.belief_last_update = state.game_time
+            mem.confidence = max(mem.confidence, cfg.sound_confidence)
 
         current_cell = world_to_cell(cfg, state.player_pos[0], state.player_pos[1])
         state.ever_seen[current_cell[0]][current_cell[1]] = True
@@ -377,6 +409,14 @@ def main() -> None:
             state.target_cell = None
             state.target_kind = None
             is_scanning = state.scan_remaining > 0.0
+
+        if state.sound_turn_remaining > 0.0 and state.sound_target_angle is not None and not is_scanning:
+            state.player_angle = rotate_toward(
+                state.player_angle,
+                state.sound_target_angle,
+                cfg.rot_speed * cfg.sound_turn_speed_mult * dt,
+            )
+            state.sound_turn_remaining = max(0.0, state.sound_turn_remaining - dt)
 
         if is_scanning:
             step = cfg.rot_speed * dt
@@ -518,7 +558,9 @@ def main() -> None:
             state.frames_no_progress = 0
 
         if (not is_scanning) and (
-            state.target_cell is None or state.search_state in ("idle", "reached", "unreachable")
+            state.target_cell is None
+            or state.search_state in ("idle", "reached", "unreachable")
+            or len(visible_animals) > 0
         ):
             hunger_ratio = state.hunger / max(1e-6, cfg.hunger_max)
             satiety = 1.0 - hunger_ratio
@@ -597,6 +639,8 @@ def main() -> None:
                 score = cfg.hunt_weight * hunt_drive * p_catch / (1.0 + dist_steps)
                 if dist <= cfg.tile_size * 2.5:
                     score = max(score, cfg.hunt_weight * 0.5)
+                else:
+                    score = max(score, cfg.hunt_weight * 0.35)
                 if score > hunt_score:
                     hunt_score = score
                     hunt_cell = target
@@ -789,7 +833,7 @@ def main() -> None:
                         start_scan("stuck")
                         if state.scan_remaining > 0.0:
                             state.search_state = "scanning"
-        elif not is_scanning:
+        elif not is_scanning and state.sound_turn_remaining <= 0.0:
             state.player_angle = (state.player_angle + cfg.rot_speed * dt) % (2 * math.pi)
 
         current_cell_after = world_to_cell(cfg, state.player_pos[0], state.player_pos[1])

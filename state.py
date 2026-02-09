@@ -8,6 +8,7 @@ from grid import cell_center
 from world_gen import generate_cave, find_spawn_cell
 from foraging import init_bushes, reset_bush_memory
 from animals import Animal, spawn_animals
+from sound import SoundEvent
 
 
 @dataclass
@@ -41,6 +42,11 @@ class GameState:
     hunt_retarget_timer: float
     hunt_search_timer: float
     hunt_last_search_center: tuple[int, int] | None
+
+    # Sound
+    sound_events: list[SoundEvent]
+    sound_target_angle: float | None
+    sound_turn_remaining: float
 
     # Agent state
     player_pos: tuple[float, float]
@@ -145,6 +151,9 @@ def init_state(cfg: Config, seed: int) -> GameState:
         hunt_retarget_timer=0.0,
         hunt_search_timer=0.0,
         hunt_last_search_center=None,
+        sound_events=[],
+        sound_target_angle=None,
+        sound_turn_remaining=0.0,
         player_pos=player_pos,
         player_angle=0.0,
         target_cell=None,
