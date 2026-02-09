@@ -82,3 +82,13 @@ def draw_animals(cfg: Config, state, screen, cam_x, cam_y, seen_cells):
         sy = int(animal.pos[1] - cam_y)
         radius = max(2, cfg.tile_size // 3)
         pygame.draw.circle(screen, cfg.animal_color, (sx, sy), radius)
+
+
+def draw_wolves(cfg: Config, state, screen, cam_x, cam_y):
+    for wolf in state.wolves:
+        if not wolf.alive:
+            continue
+        sx = int(wolf.pos[0] - cam_x)
+        sy = int(wolf.pos[1] - cam_y)
+        radius = max(3, cfg.tile_size // 3)
+        pygame.draw.circle(screen, cfg.wolf_color, (sx, sy), radius)

@@ -87,6 +87,35 @@ class Config:
     sound_turn_speed_mult: float
     animal_sound_level: float
     sound_confidence: float
+
+    # Wolves
+    wolf_count: int
+    wolf_speed: float
+    wolf_wander_radius: int
+    wolf_repath_sec: float
+    wolf_sight_range_tiles: int
+    wolf_sound_level: float
+    wolf_hearing_range_tiles: int
+
+    # Combat
+    player_max_hp: float
+    player_dps: float
+    player_attack_range_tiles: float
+    player_attack_cooldown: float
+    wolf_max_hp: float
+    wolf_dps: float
+    wolf_attack_range_tiles: float
+    wolf_attack_cooldown: float
+
+    # Fight/Flee
+    flee_hp_threshold: float
+    flee_outnumbered: int
+    fight_hunger_threshold: float
+    flee_duration_sec: float
+
+    # Rendering
+    wolf_color: tuple[int, int, int]
+    show_wolf_fov: bool
     hunt_weight: float
     hunt_eat_amount: float
     hunt_retarget_sec: float
@@ -198,6 +227,35 @@ def load_config() -> Config:
         sound_turn_speed_mult=cfg.SOUND_TURN_SPEED_MULT,
         animal_sound_level=cfg.ANIMAL_SOUND_LEVEL,
         sound_confidence=cfg.SOUND_CONFIDENCE,
+
+        # Wolves
+        wolf_count=cfg.WOLF_COUNT,
+        wolf_speed=cfg.WOLF_SPEED,
+        wolf_wander_radius=cfg.WOLF_WANDER_RADIUS,
+        wolf_repath_sec=cfg.WOLF_REPATH_SEC,
+        wolf_sight_range_tiles=cfg.WOLF_SIGHT_RANGE_TILES,
+        wolf_sound_level=cfg.WOLF_SOUND_LEVEL,
+        wolf_hearing_range_tiles=cfg.WOLF_HEARING_RANGE_TILES,
+
+        # Combat
+        player_max_hp=cfg.PLAYER_MAX_HP,
+        player_dps=cfg.PLAYER_DPS,
+        player_attack_range_tiles=cfg.PLAYER_ATTACK_RANGE_TILES,
+        player_attack_cooldown=cfg.PLAYER_ATTACK_COOLDOWN,
+        wolf_max_hp=cfg.WOLF_MAX_HP,
+        wolf_dps=cfg.WOLF_DPS,
+        wolf_attack_range_tiles=cfg.WOLF_ATTACK_RANGE_TILES,
+        wolf_attack_cooldown=cfg.WOLF_ATTACK_COOLDOWN,
+
+        # Fight/Flee
+        flee_hp_threshold=cfg.FLEE_HP_THRESHOLD,
+        flee_outnumbered=cfg.FLEE_OUTNUMBERED,
+        fight_hunger_threshold=cfg.FIGHT_HUNGER_THRESHOLD,
+        flee_duration_sec=cfg.FLEE_DURATION_SEC,
+
+        # Rendering
+        wolf_color=cfg.WOLF_COLOR,
+        show_wolf_fov=cfg.SHOW_WOLF_FOV,
         hunt_weight=cfg.HUNT_WEIGHT,
         hunt_eat_amount=cfg.HUNT_EAT_AMOUNT,
         hunt_retarget_sec=cfg.HUNT_RETARGET_SEC,

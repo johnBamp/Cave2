@@ -9,6 +9,7 @@ from world_gen import generate_cave, find_spawn_cell
 from foraging import init_bushes, reset_bush_memory
 from animals import Animal, spawn_animals
 from sound import SoundEvent
+from wolves import Wolf, spawn_wolves
 
 
 @dataclass
@@ -47,6 +48,13 @@ class GameState:
     sound_events: list[SoundEvent]
     sound_target_angle: float | None
     sound_turn_remaining: float
+
+    # Wolves / Combat
+    wolves: list[Wolf]
+    player_hp: float
+    player_attack_cooldown: float
+    flee_timer: float
+    combat_target_id: int | None
 
     # Agent state
     player_pos: tuple[float, float]
@@ -113,6 +121,7 @@ def init_state(cfg: Config, seed: int) -> GameState:
     player_pos = cell_center(cfg, *spawn_cell)
 
     animals = spawn_animals(cfg, objective, main_region, random.Random(seed + 4242))
+    wolves = spawn_wolves(cfg, objective, main_region, random.Random(seed + 6969))
     animal_memory: dict[int, AnimalMemory] = {}
     for animal in animals:
         animal_memory[animal.id] = AnimalMemory(
@@ -154,6 +163,11 @@ def init_state(cfg: Config, seed: int) -> GameState:
         sound_events=[],
         sound_target_angle=None,
         sound_turn_remaining=0.0,
+        wolves=wolves,
+        player_hp=cfg.player_max_hp,
+        player_attack_cooldown=0.0,
+        flee_timer=0.0,
+        combat_target_id=None,
         player_pos=player_pos,
         player_angle=0.0,
         target_cell=None,

@@ -32,7 +32,8 @@ from exploration import (
     pick_nearest_known_open,
 )
 from animals import update_animals, respawn_animal
-from rendering import draw_world, draw_player, draw_target, draw_frontiers, draw_animals
+from rendering import draw_world, draw_player, draw_target, draw_frontiers, draw_animals, draw_wolves
+from wolves import update_wolves, wolf_attack, respawn_wolf, wolf_can_see_player
 from sound import emit_sound, process_hearing
 
 
@@ -219,12 +220,17 @@ def main() -> None:
         state.game_time += dt
         state.hunger = min(cfg.hunger_max, state.hunger + cfg.hunger_decay_per_sec * dt)
         update_animals(cfg, state, dt, animals_rng, player_pos=state.player_pos)
+        update_wolves(cfg, state, dt, animals_rng, player_pos=state.player_pos)
         state.sound_events.clear()
         if cfg.sound_enabled:
             for animal in state.animals:
                 if not animal.alive:
                     continue
                 emit_sound(state, animal.pos, cfg.animal_sound_level, animal.id, "animal")
+            for wolf in state.wolves:
+                if not wolf.alive:
+                    continue
+                emit_sound(state, wolf.pos, cfg.wolf_sound_level, wolf.id, "wolf")
         update_fruit_respawn(cfg, state, state.game_time)
 
         if state.respawn_estimate_sec is None:
@@ -364,26 +370,51 @@ def main() -> None:
                     else:
                         mem.belief_cell = pred_cell
 
-        if (
-            sound_event is not None
-            and sound_event.kind == "animal"
-            and sound_event.source_id is not None
-            and sound_event.source_id in state.animal_memory
-            and sound_event.source_id not in visible_animals
-        ):
-            mem = state.animal_memory[sound_event.source_id]
-            mem.belief_pos = sound_event.pos
-            mem.belief_cell = world_to_cell(cfg, sound_event.pos[0], sound_event.pos[1])
-            mem.belief_radius = max(mem.belief_radius, 1.0)
-            mem.belief_heading = sound_angle if sound_angle is not None else mem.belief_heading
-            mem.belief_last_update = state.game_time
-            mem.confidence = max(mem.confidence, cfg.sound_confidence)
+        if sound_event is not None:
+            if (
+                sound_event.kind == "animal"
+                and sound_event.source_id is not None
+                and sound_event.source_id in state.animal_memory
+                and sound_event.source_id not in visible_animals
+            ):
+                mem = state.animal_memory[sound_event.source_id]
+                mem.belief_pos = sound_event.pos
+                mem.belief_cell = world_to_cell(cfg, sound_event.pos[0], sound_event.pos[1])
+                mem.belief_radius = max(mem.belief_radius, 1.0)
+                mem.belief_heading = sound_angle if sound_angle is not None else mem.belief_heading
+                mem.belief_last_update = state.game_time
+                mem.confidence = max(mem.confidence, cfg.sound_confidence)
 
         current_cell = world_to_cell(cfg, state.player_pos[0], state.player_pos[1])
         state.ever_seen[current_cell[0]][current_cell[1]] = True
         state.subjective[current_cell[0]][current_cell[1]] = min(
             state.subjective[current_cell[0]][current_cell[1]], 0.0
         )
+
+        state.player_attack_cooldown = max(0.0, state.player_attack_cooldown - dt)
+
+        nearby_wolves = []
+        for wolf in state.wolves:
+            if not wolf.alive:
+                continue
+            dist = math.hypot(wolf.pos[0] - state.player_pos[0], wolf.pos[1] - state.player_pos[1])
+            if dist <= cfg.wolf_sight_range_tiles * cfg.tile_size:
+                nearby_wolves.append(wolf)
+
+        hp_ratio = state.player_hp / max(1e-6, cfg.player_max_hp)
+        outnumbered = len(nearby_wolves) >= cfg.flee_outnumbered
+        if hp_ratio < cfg.flee_hp_threshold or outnumbered:
+            state.flee_timer = cfg.flee_duration_sec
+        else:
+            state.flee_timer = max(0.0, state.flee_timer - dt)
+
+        nearest_wolf = None
+        nearest_wolf_dist = None
+        for wolf in nearby_wolves:
+            dist = math.hypot(wolf.pos[0] - state.player_pos[0], wolf.pos[1] - state.player_pos[1])
+            if nearest_wolf_dist is None or dist < nearest_wolf_dist:
+                nearest_wolf = wolf
+                nearest_wolf_dist = dist
 
         dist_known, parent_known = bfs_known_open(cfg, state, current_cell)
         is_scanning = state.scan_remaining > 0.0
@@ -562,204 +593,261 @@ def main() -> None:
             or state.search_state in ("idle", "reached", "unreachable")
             or len(visible_animals) > 0
         ):
-            hunger_ratio = state.hunger / max(1e-6, cfg.hunger_max)
-            satiety = 1.0 - hunger_ratio
-            hunt_drive = max(0.25, hunger_ratio)
-            known_bushes = [(bx, by) for (bx, by) in state.bush_positions if state.bush_known[bx][by]]
-            home_cell = None
-            if state.last_harvest_cell is not None:
-                home_cell = state.last_harvest_cell
-            elif known_bushes:
-                avg_x = sum(b[0] for b in known_bushes) / len(known_bushes)
-                avg_y = sum(b[1] for b in known_bushes) / len(known_bushes)
-                home_cell = min(
-                    known_bushes,
-                    key=lambda b: (b[0] - avg_x) ** 2 + (b[1] - avg_y) ** 2
+            if state.flee_timer > 0.0 and nearby_wolves:
+                sx = 0.0
+                sy = 0.0
+                for wolf in nearby_wolves:
+                    dx = state.player_pos[0] - wolf.pos[0]
+                    dy = state.player_pos[1] - wolf.pos[1]
+                    dist = math.hypot(dx, dy)
+                    if dist > 1e-6:
+                        sx += dx / dist
+                        sy += dy / dist
+                if abs(sx) + abs(sy) < 1e-6:
+                    sx, sy = 1.0, 0.0
+                flee_dist = cfg.flee_duration_sec * cfg.move_speed
+                target_pos = (
+                    state.player_pos[0] + sx * flee_dist,
+                    state.player_pos[1] + sy * flee_dist,
                 )
-            home_radius = cfg.home_radius + int(cfg.home_radius_extra * satiety)
-
-            forage_cell, forage_score = pick_best_forage(
-                cfg, state, dist_known, state.game_time, state.hunger, current_cell
-            )
-            no_forage = forage_cell is None
-            frontier_cell = pick_exploration_target_from_dist(cfg, state, current_cell, dist_known)
-            frontier_score = 0.0
-            if frontier_cell is not None:
-                frontier_score = cfg.frontier_weight / (1.0 + dist_known[frontier_cell[0]][frontier_cell[1]])
-                if home_cell is not None:
-                    if no_forage:
-                        home_radius = cfg.home_radius + cfg.home_radius_extra
-                    near_frontier = pick_frontier_near_home(cfg, state, dist_known, home_cell, home_radius)
-                    if near_frontier is not None:
-                        frontier_cell = near_frontier
-                        frontier_score = cfg.frontier_weight / (1.0 + dist_known[frontier_cell[0]][frontier_cell[1]])
-                    home_dist = abs(frontier_cell[0] - home_cell[0]) + abs(frontier_cell[1] - home_cell[1])
-                    if home_dist > home_radius:
-                        if no_forage:
-                            far_mult = 1.0
-                        else:
-                            far_mult = cfg.home_far_mult + (1.0 - cfg.home_far_mult) * satiety
-                        frontier_score *= far_mult
-                frontier_score *= (1.0 + satiety * cfg.frontier_satiety_bonus)
-                if known_bushes:
-                    frontier_score *= cfg.explore_when_bushes_mult
-
-            hunt_cell = None
-            hunt_score = 0.0
-            hunt_kind = None
-            hunt_id = None
-
-            for animal in state.animals:
-                if not animal.alive:
-                    continue
-                if animal.id not in visible_animals:
-                    continue
-                mem = state.animal_memory[animal.id]
-                dist = math.hypot(
-                    animal.pos[0] - state.player_pos[0],
-                    animal.pos[1] - state.player_pos[1],
+                target_cell = world_to_cell(cfg, target_pos[0], target_pos[1])
+                target_cell = (
+                    clamp(target_cell[0], 1, cfg.tiles_x - 2),
+                    clamp(target_cell[1], 1, cfg.tiles_y - 2),
                 )
-                tau = clamp(dist / max(cfg.move_speed, 1.0), 0.2, 1.0)
-                pred_x = animal.pos[0] + mem.vel_est[0] * tau
-                pred_y = animal.pos[1] + mem.vel_est[1] * tau
-                pred_cell = world_to_cell(cfg, pred_x, pred_y)
-                cx, cy = world_to_cell(cfg, animal.pos[0], animal.pos[1])
-                target = None
-                if 0 <= pred_cell[0] < cfg.tiles_x and 0 <= pred_cell[1] < cfg.tiles_y:
-                    if dist_known[pred_cell[0]][pred_cell[1]] != -1:
-                        target = pred_cell
-                if target is None and dist_known[cx][cy] != -1:
-                    target = (cx, cy)
-                if target is None:
-                    continue
-                dist_steps = dist_known[target[0]][target[1]]
-                if dist_steps == -1:
-                    continue
-                p_catch = clamp(1.0 - dist / (cfg.tile_size * 10.0), 0.0, 1.0)
-                score = cfg.hunt_weight * hunt_drive * p_catch / (1.0 + dist_steps)
-                if dist <= cfg.tile_size * 2.5:
-                    score = max(score, cfg.hunt_weight * 0.5)
+                if not in_bounds_cell(cfg, target_cell[0], target_cell[1]) or state.objective[
+                    target_cell[0]
+                ][target_cell[1]] == 1:
+                    target_cell = project_to_known_open(cfg, state, target_cell, 6)
+                if target_cell is not None:
+                    state.target_cell = target_cell
+                    state.target_kind = "flee"
+                    state.combat_target_id = None
+                    state.search_state = "searching"
+                    state.stuck_frames = 0
+                    # skip other targets while fleeing
                 else:
-                    score = max(score, cfg.hunt_weight * 0.35)
-                if score > hunt_score:
-                    hunt_score = score
-                    hunt_cell = target
-                    hunt_kind = "hunt"
-                    hunt_id = animal.id
+                    state.target_cell = None
+                    state.target_kind = None
+                    state.combat_target_id = None
+                    state.search_state = "idle"
 
-            for animal in state.animals:
-                if not animal.alive:
-                    continue
-                if animal.id in visible_animals:
-                    continue
-                mem = state.animal_memory[animal.id]
-                if mem.confidence <= 0.0 or mem.belief_cell is None:
-                    continue
-                if dist_known[mem.belief_cell[0]][mem.belief_cell[1]] == -1:
-                    continue
-                dist_steps = dist_known[mem.belief_cell[0]][mem.belief_cell[1]]
-                score = cfg.hunt_weight * hunt_drive * mem.confidence / (1.0 + dist_steps)
-                score = score / (1.0 + max(0.0, mem.belief_radius))
-                if score > hunt_score:
-                    hunt_score = score
-                    hunt_cell = mem.belief_cell
-                    hunt_kind = "track"
-                    hunt_id = animal.id
+        if state.target_kind != "flee":
+                hunger_ratio = state.hunger / max(1e-6, cfg.hunger_max)
+                satiety = 1.0 - hunger_ratio
+                hunt_drive = max(0.25, hunger_ratio)
+                known_bushes = [(bx, by) for (bx, by) in state.bush_positions if state.bush_known[bx][by]]
+                home_cell = None
+                if state.last_harvest_cell is not None:
+                    home_cell = state.last_harvest_cell
+                elif known_bushes:
+                    avg_x = sum(b[0] for b in known_bushes) / len(known_bushes)
+                    avg_y = sum(b[1] for b in known_bushes) / len(known_bushes)
+                    home_cell = min(
+                        known_bushes,
+                        key=lambda b: (b[0] - avg_x) ** 2 + (b[1] - avg_y) ** 2
+                    )
+                home_radius = cfg.home_radius + int(cfg.home_radius_extra * satiety)
 
-            if (
-                state.hunt_target_id is not None
-                and state.hunt_last_search_center is not None
-                and state.hunt_search_timer < cfg.hunt_search_time
-            ):
-                mem = state.animal_memory[state.hunt_target_id]
-                search_cell = pick_random_known_open_in_radius(
-                    cfg, state, state.hunt_last_search_center, cfg.hunt_search_radius, animals_rng, current_cell
+                forage_cell, forage_score = pick_best_forage(
+                    cfg, state, dist_known, state.game_time, state.hunger, current_cell
                 )
-                if search_cell is not None and dist_known[search_cell[0]][search_cell[1]] != -1:
-                    dist_steps = dist_known[search_cell[0]][search_cell[1]]
-                    score = cfg.hunt_weight * hunt_drive * mem.confidence / (1.0 + dist_steps)
+                no_forage = forage_cell is None
+                frontier_cell = pick_exploration_target_from_dist(cfg, state, current_cell, dist_known)
+                frontier_score = 0.0
+                if frontier_cell is not None:
+                    frontier_score = cfg.frontier_weight / (1.0 + dist_known[frontier_cell[0]][frontier_cell[1]])
+                    if home_cell is not None:
+                        if no_forage:
+                            home_radius = cfg.home_radius + cfg.home_radius_extra
+                        near_frontier = pick_frontier_near_home(cfg, state, dist_known, home_cell, home_radius)
+                        if near_frontier is not None:
+                            frontier_cell = near_frontier
+                            frontier_score = cfg.frontier_weight / (1.0 + dist_known[frontier_cell[0]][frontier_cell[1]])
+                        home_dist = abs(frontier_cell[0] - home_cell[0]) + abs(frontier_cell[1] - home_cell[1])
+                        if home_dist > home_radius:
+                            if no_forage:
+                                far_mult = 1.0
+                            else:
+                                far_mult = cfg.home_far_mult + (1.0 - cfg.home_far_mult) * satiety
+                            frontier_score *= far_mult
+                    frontier_score *= (1.0 + satiety * cfg.frontier_satiety_bonus)
+                    if known_bushes:
+                        frontier_score *= cfg.explore_when_bushes_mult
+
+                hunt_cell = None
+                hunt_score = 0.0
+                hunt_kind = None
+                hunt_id = None
+
+                for animal in state.animals:
+                    if not animal.alive:
+                        continue
+                    if animal.id not in visible_animals:
+                        continue
+                    mem = state.animal_memory[animal.id]
+                    dist = math.hypot(
+                        animal.pos[0] - state.player_pos[0],
+                        animal.pos[1] - state.player_pos[1],
+                    )
+                    tau = clamp(dist / max(cfg.move_speed, 1.0), 0.2, 1.0)
+                    pred_x = animal.pos[0] + mem.vel_est[0] * tau
+                    pred_y = animal.pos[1] + mem.vel_est[1] * tau
+                    pred_cell = world_to_cell(cfg, pred_x, pred_y)
+                    cx, cy = world_to_cell(cfg, animal.pos[0], animal.pos[1])
+                    target = None
+                    if 0 <= pred_cell[0] < cfg.tiles_x and 0 <= pred_cell[1] < cfg.tiles_y:
+                        if dist_known[pred_cell[0]][pred_cell[1]] != -1:
+                            target = pred_cell
+                    if target is None and dist_known[cx][cy] != -1:
+                        target = (cx, cy)
+                    if target is None:
+                        continue
+                    dist_steps = dist_known[target[0]][target[1]]
+                    if dist_steps == -1:
+                        continue
+                    p_catch = clamp(1.0 - dist / (cfg.tile_size * 10.0), 0.0, 1.0)
+                    score = cfg.hunt_weight * hunt_drive * p_catch / (1.0 + dist_steps)
+                    if dist <= cfg.tile_size * 2.5:
+                        score = max(score, cfg.hunt_weight * 0.5)
+                    else:
+                        score = max(score, cfg.hunt_weight * 0.35)
                     if score > hunt_score:
                         hunt_score = score
-                        hunt_cell = search_cell
-                        hunt_kind = "search"
-                        hunt_id = state.hunt_target_id
+                        hunt_cell = target
+                        hunt_kind = "hunt"
+                        hunt_id = animal.id
 
-            best_alt = max(forage_score, frontier_score)
-            force_hunt = False
-            if state.target_kind in ("hunt", "track", "search") and hunt_score > 0.0:
-                if hunt_score >= cfg.hunt_sticky_ratio * best_alt:
-                    force_hunt = True
+                for animal in state.animals:
+                    if not animal.alive:
+                        continue
+                    if animal.id in visible_animals:
+                        continue
+                    mem = state.animal_memory[animal.id]
+                    if mem.confidence <= 0.0 or mem.belief_cell is None:
+                        continue
+                    if dist_known[mem.belief_cell[0]][mem.belief_cell[1]] == -1:
+                        continue
+                    dist_steps = dist_known[mem.belief_cell[0]][mem.belief_cell[1]]
+                    score = cfg.hunt_weight * hunt_drive * mem.confidence / (1.0 + dist_steps)
+                    score = score / (1.0 + max(0.0, mem.belief_radius))
+                    if score > hunt_score:
+                        hunt_score = score
+                        hunt_cell = mem.belief_cell
+                        hunt_kind = "track"
+                        hunt_id = animal.id
 
-            if force_hunt and hunt_cell is not None:
-                state.target_cell = hunt_cell
-                state.target_kind = hunt_kind
-                state.hunt_target_id = hunt_id
-                state.search_state = "searching"
-                state.stuck_frames = 0
-            elif hunt_cell is not None and hunt_score > 0.0 and hunt_score >= max(forage_score, frontier_score):
-                state.target_cell = hunt_cell
-                state.target_kind = hunt_kind
-                state.hunt_target_id = hunt_id
-                state.search_state = "searching"
-                state.stuck_frames = 0
-            elif forage_cell is not None and (
-                state.hunger >= cfg.forage_priority_hunger or forage_score > frontier_score
-            ):
-                state.target_cell = forage_cell
-                state.target_kind = "forage"
-                state.hunt_target_id = None
-                state.search_state = "searching"
-                state.stuck_frames = 0
-            elif frontier_cell is not None:
-                state.target_cell = frontier_cell
-                state.target_kind = "frontier"
-                state.hunt_target_id = None
-                state.search_state = "searching"
-                state.stuck_frames = 0
-            elif home_cell is not None:
-                loiter = pick_loiter_target(cfg, state, dist_known, home_cell, cfg.loiter_radius, current_cell)
-                if loiter is not None:
-                    state.target_cell = loiter
-                    state.target_kind = "home"
+                if (
+                    state.hunt_target_id is not None
+                    and state.hunt_last_search_center is not None
+                    and state.hunt_search_timer < cfg.hunt_search_time
+                ):
+                    mem = state.animal_memory[state.hunt_target_id]
+                    search_cell = pick_random_known_open_in_radius(
+                        cfg, state, state.hunt_last_search_center, cfg.hunt_search_radius, animals_rng, current_cell
+                    )
+                    if search_cell is not None and dist_known[search_cell[0]][search_cell[1]] != -1:
+                        dist_steps = dist_known[search_cell[0]][search_cell[1]]
+                        score = cfg.hunt_weight * hunt_drive * mem.confidence / (1.0 + dist_steps)
+                        if score > hunt_score:
+                            hunt_score = score
+                            hunt_cell = search_cell
+                            hunt_kind = "search"
+                            hunt_id = state.hunt_target_id
+
+                best_alt = max(forage_score, frontier_score)
+                force_hunt = False
+                if state.target_kind in ("hunt", "track", "search") and hunt_score > 0.0:
+                    if hunt_score >= cfg.hunt_sticky_ratio * best_alt:
+                        force_hunt = True
+
+                if force_hunt and hunt_cell is not None:
+                    state.target_cell = hunt_cell
+                    state.target_kind = hunt_kind
+                    state.hunt_target_id = hunt_id
+                    state.search_state = "searching"
+                    state.stuck_frames = 0
+                elif nearest_wolf is not None and hp_ratio >= cfg.flee_hp_threshold and (
+                    hunger_ratio >= cfg.fight_hunger_threshold or len(nearby_wolves) <= 1
+                ):
+                    state.target_cell = world_to_cell(cfg, nearest_wolf.pos[0], nearest_wolf.pos[1])
+                    state.target_kind = "fight"
+                    state.combat_target_id = nearest_wolf.id
                     state.hunt_target_id = None
                     state.search_state = "searching"
                     state.stuck_frames = 0
-                else:
-                    patrol = None
-                    if not no_forage:
-                        patrol = pick_nearest_known_bush(cfg, state, dist_known, current_cell, home_cell, home_radius)
-                    if patrol is None:
-                        patrol = pick_nearest_known_open(
-                            cfg, state, dist_known, current_cell, home_cell, home_radius, avoid_bushes=True
-                        )
-                    if patrol is None:
-                        patrol = pick_nearest_known_open(
-                            cfg, state, dist_known, current_cell, None, None, avoid_bushes=True
-                        )
-                    if patrol is not None:
-                        state.target_cell = patrol
+                elif hunt_cell is not None and hunt_score > 0.0 and hunt_score >= max(forage_score, frontier_score):
+                    state.target_cell = hunt_cell
+                    state.target_kind = hunt_kind
+                    state.hunt_target_id = hunt_id
+                    state.combat_target_id = None
+                    state.search_state = "searching"
+                    state.stuck_frames = 0
+                elif forage_cell is not None and (
+                    state.hunger >= cfg.forage_priority_hunger or forage_score > frontier_score
+                ):
+                    state.target_cell = forage_cell
+                    state.target_kind = "forage"
+                    state.hunt_target_id = None
+                    state.combat_target_id = None
+                    state.search_state = "searching"
+                    state.stuck_frames = 0
+                elif frontier_cell is not None:
+                    state.target_cell = frontier_cell
+                    state.target_kind = "frontier"
+                    state.hunt_target_id = None
+                    state.combat_target_id = None
+                    state.search_state = "searching"
+                    state.stuck_frames = 0
+                elif home_cell is not None:
+                    loiter = pick_loiter_target(cfg, state, dist_known, home_cell, cfg.loiter_radius, current_cell)
+                    if loiter is not None:
+                        state.target_cell = loiter
                         state.target_kind = "home"
                         state.hunt_target_id = None
+                        state.combat_target_id = None
+                        state.search_state = "searching"
+                        state.stuck_frames = 0
+                    else:
+                        patrol = None
+                        if not no_forage:
+                            patrol = pick_nearest_known_bush(cfg, state, dist_known, current_cell, home_cell, home_radius)
+                        if patrol is None:
+                            patrol = pick_nearest_known_open(
+                                cfg, state, dist_known, current_cell, home_cell, home_radius, avoid_bushes=True
+                            )
+                        if patrol is None:
+                            patrol = pick_nearest_known_open(
+                                cfg, state, dist_known, current_cell, None, None, avoid_bushes=True
+                            )
+                        if patrol is not None:
+                            state.target_cell = patrol
+                            state.target_kind = "home"
+                            state.hunt_target_id = None
+                            state.combat_target_id = None
+                            state.search_state = "searching"
+                            state.stuck_frames = 0
+                        else:
+                            state.target_cell = None
+                            state.target_kind = None
+                            state.hunt_target_id = None
+                            state.combat_target_id = None
+                            state.search_state = "idle"
+                else:
+                    roam = pick_nearest_known_open(cfg, state, dist_known, current_cell, None, None, avoid_bushes=False)
+                    if roam is not None:
+                        state.target_cell = roam
+                        state.target_kind = "roam"
+                        state.hunt_target_id = None
+                        state.combat_target_id = None
                         state.search_state = "searching"
                         state.stuck_frames = 0
                     else:
                         state.target_cell = None
                         state.target_kind = None
                         state.hunt_target_id = None
+                        state.combat_target_id = None
                         state.search_state = "idle"
-            else:
-                roam = pick_nearest_known_open(cfg, state, dist_known, current_cell, None, None, avoid_bushes=False)
-                if roam is not None:
-                    state.target_cell = roam
-                    state.target_kind = "roam"
-                    state.hunt_target_id = None
-                    state.search_state = "searching"
-                    state.stuck_frames = 0
-                else:
-                    state.target_cell = None
-                    state.target_kind = None
-                    state.hunt_target_id = None
-                    state.search_state = "idle"
 
         path = []
         if not is_scanning:
@@ -855,6 +943,48 @@ def main() -> None:
             state.target_kind = None
             state.search_state = "idle"
 
+        # -------------------- Combat --------------------
+        for wolf in state.wolves:
+            if not wolf.alive:
+                continue
+            wolf_attack(cfg, state, wolf, dt)
+
+        if state.player_hp <= 0.0:
+            running = False
+
+        if state.combat_target_id is not None:
+            target_wolf = next((w for w in state.wolves if w.id == state.combat_target_id and w.alive), None)
+            if target_wolf is not None:
+                dist = math.hypot(
+                    target_wolf.pos[0] - state.player_pos[0],
+                    target_wolf.pos[1] - state.player_pos[1],
+                )
+                if dist <= cfg.player_attack_range_tiles * cfg.tile_size:
+                    # stop moving to avoid jitter while fighting
+                    state.target_cell = None
+                    state.target_kind = "fight"
+                    state.search_state = "idle"
+                if dist <= cfg.player_attack_range_tiles * cfg.tile_size and state.player_attack_cooldown <= 0.0:
+                    damage = cfg.player_dps * cfg.player_attack_cooldown
+                    target_wolf.hp = max(0.0, target_wolf.hp - damage)
+                    state.player_attack_cooldown = cfg.player_attack_cooldown
+                    if target_wolf.hp <= 0.0:
+                        target_wolf.alive = False
+                        state.hunger = max(0.0, state.hunger - cfg.hunt_eat_amount)
+                        respawn_wolf(
+                            cfg,
+                            state,
+                            target_wolf,
+                            animals_rng,
+                            avoid_cell=current_cell_after,
+                            avoid_radius=cfg.home_radius,
+                        )
+                        state.combat_target_id = None
+                        if state.target_kind == "fight":
+                            state.target_cell = None
+                            state.target_kind = None
+                            state.search_state = "idle"
+
         for animal in state.animals:
             if not animal.alive:
                 continue
@@ -888,6 +1018,7 @@ def main() -> None:
         screen.fill(cfg.black)
         draw_world(cfg, state, screen, cam_x, cam_y, seen_cells)
         draw_animals(cfg, state, screen, cam_x, cam_y, seen_cells)
+        draw_wolves(cfg, state, screen, cam_x, cam_y)
         draw_target(cfg, screen, state.target_cell, cam_x, cam_y)
         draw_player(cfg, screen, state.player_pos, state.player_angle, cam_x, cam_y)
         draw_frontiers(cfg, state, screen, cam_x, cam_y, dist_known)
