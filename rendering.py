@@ -4,7 +4,7 @@ import math
 import pygame
 
 from config import Config
-from grid import clamp
+from grid import clamp, world_to_cell
 from exploration import find_frontier_clusters, pick_cluster_representative
 
 
@@ -39,12 +39,12 @@ def draw_world(cfg: Config, state, screen, cam_x, cam_y, seen_cells):
             pygame.draw.rect(screen, fill, rect)
             pygame.draw.rect(screen, cfg.grid_color, rect, 1)
 
-            if (gx, gy) in seen_cells:
+            if cfg.show_player_fov and (gx, gy) in seen_cells:
                 pygame.draw.rect(screen, cfg.player_color, rect, 2)
 
             if state.ever_seen[gx][gy] and state.bushes[gx][gy]:
                 pygame.draw.rect(screen, cfg.bush_color, rect, 1)
-                if state.fruit[gx][gy]:
+                if cfg.fruit_enabled and state.fruit[gx][gy]:
                     cx = sx + cfg.tile_size // 2
                     cy = sy + cfg.tile_size // 2
                     pygame.draw.circle(screen, cfg.fruit_color, (cx, cy), max(2, cfg.tile_size // 4))
@@ -69,3 +69,16 @@ def draw_frontiers(cfg: Config, state, screen, cam_x, cam_y, dist):
         sy = int(gy * cfg.tile_size - cam_y)
         rect = pygame.Rect(sx, sy, cfg.tile_size, cfg.tile_size)
         pygame.draw.rect(screen, (255, 255, 0), rect, 2)
+
+
+def draw_animals(cfg: Config, state, screen, cam_x, cam_y, seen_cells):
+    for animal in state.animals:
+        if not animal.alive:
+            continue
+        cx, cy = world_to_cell(cfg, animal.pos[0], animal.pos[1])
+        if cfg.animal_seen_only and (cx, cy) not in seen_cells:
+            continue
+        sx = int(animal.pos[0] - cam_x)
+        sy = int(animal.pos[1] - cam_y)
+        radius = max(2, cfg.tile_size // 3)
+        pygame.draw.circle(screen, cfg.animal_color, (sx, sy), radius)

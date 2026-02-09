@@ -38,7 +38,7 @@ def init_bushes(cfg: Config, objective, main_region, rng: random.Random):
     for (gx, gy) in allowed:
         if rng.random() < cfg.bush_density:
             bushes[gx][gy] = True
-            fruit[gx][gy] = True
+            fruit[gx][gy] = cfg.fruit_enabled
             last_harvest_time[gx][gy] = -1e9
             bush_positions.append((gx, gy))
 
@@ -101,6 +101,8 @@ def observe_bushes_from_cells(cfg: Config, state, cells, game_time: float) -> No
 
 
 def update_fruit_respawn(cfg: Config, state, game_time: float) -> None:
+    if not cfg.fruit_enabled:
+        return
     for (cx, cy) in state.bush_positions:
         if not state.fruit[cx][cy]:
             if game_time - state.last_harvest_time[cx][cy] >= cfg.fruit_respawn_sec:
@@ -110,6 +112,8 @@ def update_fruit_respawn(cfg: Config, state, game_time: float) -> None:
 def pick_best_forage(cfg: Config, state, dist_known, game_time: float, hunger: float, current_cell):
     best_cell = None
     best_score = 0.0
+    if not cfg.fruit_enabled:
+        return None, 0.0
     if hunger <= 0.0:
         return None, 0.0
 

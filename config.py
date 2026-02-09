@@ -27,6 +27,7 @@ class Config:
     target_color: tuple[int, int, int]
     bush_color: tuple[int, int, int]
     fruit_color: tuple[int, int, int]
+    show_player_fov: bool
 
     # Raycast
     fov_deg: float
@@ -48,6 +49,7 @@ class Config:
     bush_cluster_count: int
     bush_cluster_radius: int
     fruit_respawn_sec: float
+    fruit_enabled: bool
     hunger_max: float
     hunger_decay_per_sec: float
     hunger_eat_amount: float
@@ -62,6 +64,30 @@ class Config:
     loiter_radius: int
     home_radius_extra: int
     frontier_satiety_bonus: float
+
+    # Animals
+    animal_count: int
+    animal_speed: float
+    animal_turn_chance: float
+    animal_stuck_turn: float
+    animal_flee_radius: int
+    animal_flee_speed_mult: float
+    animal_wander_radius: int
+    animal_repath_sec: float
+    animal_belief_growth: float
+    animal_predict_max_sec: float
+    animal_search_ring_step: int
+    animal_search_bias_deg: float
+    hunt_weight: float
+    hunt_eat_amount: float
+    hunt_retarget_sec: float
+    hunt_sticky_ratio: float
+    hunt_lost_sec: float
+    hunt_search_radius: int
+    hunt_search_time: float
+    hunt_catch_dist: float
+    animal_color: tuple[int, int, int]
+    animal_seen_only: bool
 
     # Cave generation
     fill_prob: float
@@ -103,6 +129,7 @@ def load_config() -> Config:
         target_color=cfg.TARGET_COLOR,
         bush_color=cfg.BUSH_COLOR,
         fruit_color=cfg.FRUIT_COLOR,
+        show_player_fov=cfg.SHOW_PLAYER_FOV,
 
         # Raycast
         fov_deg=cfg.FOV_DEG,
@@ -124,6 +151,7 @@ def load_config() -> Config:
         bush_cluster_count=cfg.BUSH_CLUSTER_COUNT,
         bush_cluster_radius=cfg.BUSH_CLUSTER_RADIUS,
         fruit_respawn_sec=cfg.FRUIT_RESPAWN_SEC,
+        fruit_enabled=cfg.FRUIT_ENABLED,
         hunger_max=cfg.HUNGER_MAX,
         hunger_decay_per_sec=cfg.HUNGER_DECAY_PER_SEC,
         hunger_eat_amount=cfg.HUNGER_EAT_AMOUNT,
@@ -138,6 +166,30 @@ def load_config() -> Config:
         loiter_radius=cfg.LOITER_RADIUS,
         home_radius_extra=cfg.HOME_RADIUS_EXTRA,
         frontier_satiety_bonus=cfg.FRONTIER_SATIETY_BONUS,
+
+        # Animals
+        animal_count=cfg.ANIMAL_COUNT,
+        animal_speed=cfg.ANIMAL_SPEED,
+        animal_turn_chance=cfg.ANIMAL_TURN_CHANCE,
+        animal_stuck_turn=cfg.ANIMAL_STUCK_TURN,
+        animal_flee_radius=cfg.ANIMAL_FLEE_RADIUS,
+        animal_flee_speed_mult=cfg.ANIMAL_FLEE_SPEED_MULT,
+        animal_wander_radius=cfg.ANIMAL_WANDER_RADIUS,
+        animal_repath_sec=cfg.ANIMAL_REPATH_SEC,
+        animal_belief_growth=cfg.ANIMAL_BELIEF_GROWTH,
+        animal_predict_max_sec=cfg.ANIMAL_PREDICT_MAX_SEC,
+        animal_search_ring_step=cfg.ANIMAL_SEARCH_RING_STEP,
+        animal_search_bias_deg=cfg.ANIMAL_SEARCH_BIAS_DEG,
+        hunt_weight=cfg.HUNT_WEIGHT,
+        hunt_eat_amount=cfg.HUNT_EAT_AMOUNT,
+        hunt_retarget_sec=cfg.HUNT_RETARGET_SEC,
+        hunt_sticky_ratio=cfg.HUNT_STICKY_RATIO,
+        hunt_lost_sec=cfg.HUNT_LOST_SEC,
+        hunt_search_radius=cfg.HUNT_SEARCH_RADIUS,
+        hunt_search_time=cfg.HUNT_SEARCH_TIME,
+        hunt_catch_dist=cfg.HUNT_CATCH_DIST,
+        animal_color=cfg.ANIMAL_COLOR,
+        animal_seen_only=cfg.ANIMAL_SEEN_ONLY,
 
         # Cave generation
         fill_prob=cfg.FILL_PROB,

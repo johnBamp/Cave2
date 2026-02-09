@@ -7,6 +7,7 @@ from config import Config
 from grid import cell_center
 from world_gen import generate_cave, find_spawn_cell
 from foraging import init_bushes, reset_bush_memory
+from animals import Animal, spawn_animals
 
 
 @dataclass
@@ -33,6 +34,14 @@ class GameState:
     respawn_lower_bound: float
     respawn_ema_alpha: float
 
+    # Animals
+    animals: list[Animal]
+    animal_memory: dict[int, "AnimalMemory"]
+    hunt_target_id: int | None
+    hunt_retarget_timer: float
+    hunt_search_timer: float
+    hunt_last_search_center: tuple[int, int] | None
+
     # Agent state
     player_pos: tuple[float, float]
     player_angle: float
@@ -55,6 +64,20 @@ class GameState:
     hunger: float
     game_time: float
     last_harvest_cell: tuple[int, int] | None
+
+
+@dataclass
+class AnimalMemory:
+    last_seen_pos: tuple[float, float] | None
+    last_seen_cell: tuple[int, int] | None
+    last_seen_time: float
+    vel_est: tuple[float, float]
+    confidence: float
+    belief_pos: tuple[float, float] | None
+    belief_cell: tuple[int, int] | None
+    belief_radius: float
+    belief_heading: float
+    belief_last_update: float
 
 
 def reset_belief(cfg: Config):
@@ -83,6 +106,22 @@ def init_state(cfg: Config, seed: int) -> GameState:
     spawn_cell = find_spawn_cell(cfg, objective, main_region, rng, cfg.spawn_clearance)
     player_pos = cell_center(cfg, *spawn_cell)
 
+    animals = spawn_animals(cfg, objective, main_region, random.Random(seed + 4242))
+    animal_memory: dict[int, AnimalMemory] = {}
+    for animal in animals:
+        animal_memory[animal.id] = AnimalMemory(
+            last_seen_pos=None,
+            last_seen_cell=None,
+            last_seen_time=-1e9,
+            vel_est=(0.0, 0.0),
+            confidence=0.0,
+            belief_pos=None,
+            belief_cell=None,
+            belief_radius=0.0,
+            belief_heading=0.0,
+            belief_last_update=-1e9,
+        )
+
     return GameState(
         objective=objective,
         subjective=subjective,
@@ -100,6 +139,12 @@ def init_state(cfg: Config, seed: int) -> GameState:
         respawn_estimate_sec=None,
         respawn_lower_bound=0.0,
         respawn_ema_alpha=0.3,
+        animals=animals,
+        animal_memory=animal_memory,
+        hunt_target_id=None,
+        hunt_retarget_timer=0.0,
+        hunt_search_timer=0.0,
+        hunt_last_search_center=None,
         player_pos=player_pos,
         player_angle=0.0,
         target_cell=None,
