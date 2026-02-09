@@ -27,6 +27,8 @@ BLACK = cfg.BLACK
 PLAYER_COLOR = cfg.PLAYER_COLOR
 UNKNOWN_FILL = cfg.UNKNOWN_FILL
 TARGET_COLOR = cfg.TARGET_COLOR
+BUSH_COLOR = cfg.BUSH_COLOR
+FRUIT_COLOR = cfg.FRUIT_COLOR
 
 # Raycast
 FOV_DEG = cfg.FOV_DEG
@@ -42,6 +44,27 @@ WAYPOINT_EPS = TILE_SIZE * cfg.WAYPOINT_EPS_RATIO
 STUCK_FRAMES = cfg.STUCK_FRAMES
 NO_NEW_FRAMES = cfg.NO_NEW_FRAMES
 NO_PROGRESS_FRAMES = cfg.NO_PROGRESS_FRAMES
+
+# Foraging
+BUSH_DENSITY = cfg.BUSH_DENSITY
+BUSH_CLUSTER_COUNT = cfg.BUSH_CLUSTER_COUNT
+BUSH_CLUSTER_RADIUS = cfg.BUSH_CLUSTER_RADIUS
+FRUIT_RESPAWN_SEC = cfg.FRUIT_RESPAWN_SEC
+HUNGER_MAX = cfg.HUNGER_MAX
+HUNGER_DECAY_PER_SEC = cfg.HUNGER_DECAY_PER_SEC
+HUNGER_EAT_AMOUNT = cfg.HUNGER_EAT_AMOUNT
+FORAGE_WEIGHT = cfg.FORAGE_WEIGHT
+FRONTIER_WEIGHT = cfg.FRONTIER_WEIGHT
+LIKELY_FRUIT_VALUE = cfg.LIKELY_FRUIT_VALUE
+FORAGE_PRIORITY_HUNGER = cfg.FORAGE_PRIORITY_HUNGER
+EXPLORE_WHEN_BUSHES_MULT = cfg.EXPLORE_WHEN_BUSHES_MULT
+MIN_BUSH_ATTRACTION = cfg.MIN_BUSH_ATTRACTION
+HOME_RADIUS = cfg.HOME_RADIUS
+HOME_FAR_MULT = cfg.HOME_FAR_MULT
+LOITER_RADIUS = cfg.LOITER_RADIUS
+HOME_RADIUS_EXTRA = cfg.HOME_RADIUS_EXTRA
+FRONTIER_SATIETY_BONUS = cfg.FRONTIER_SATIETY_BONUS
+RESPAWN_EMA_ALPHA = 0.3
 
 # Cave generation
 FILL_PROB = cfg.FILL_PROB
@@ -65,6 +88,22 @@ MIN_ENCLOSED_SIZE = cfg.MIN_ENCLOSED_SIZE
 objective = []  # objective[gx][gy]
 subjective = []  # belief in [0,1]
 ever_seen = []  # boolean
+
+# Foraging world state
+bushes = []  # bool grid
+fruit = []  # bool grid
+last_harvest_time = []  # float grid
+bush_positions = []  # list of (gx, gy)
+
+# Foraging memory
+bush_known = []  # bool grid
+bush_last_seen_time = []  # float grid
+bush_last_seen_fruit = []  # bool grid
+bush_last_harvest_time = []  # float grid
+bush_last_empty_time = []  # float grid
+bush_last_checked_empty_time = []  # float grid
+respawn_estimate_sec = None
+respawn_lower_bound = 0.0
 
 
 # -------------------- Utilities --------------------
@@ -261,6 +300,231 @@ def generate_cave(seed):
     return grid, main_region
 
 
+# -------------------- Foraging --------------------
+
+def init_bushes(main_region, rng):
+    global bushes, fruit, last_harvest_time, bush_positions
+    bushes = [[False for _ in range(tilesY)] for _ in range(tilesX)]
+    fruit = [[False for _ in range(tilesY)] for _ in range(tilesX)]
+    last_harvest_time = [[-1e9 for _ in range(tilesY)] for _ in range(tilesX)]
+    bush_positions = []
+
+    if BUSH_CLUSTER_COUNT <= 0:
+        return
+
+    candidates = [(gx, gy) for (gx, gy) in main_region if objective[gx][gy] == EMPTY]
+    if not candidates:
+        return
+
+    cluster_count = min(BUSH_CLUSTER_COUNT, len(candidates))
+    centers = rng.sample(candidates, cluster_count)
+    r2 = BUSH_CLUSTER_RADIUS * BUSH_CLUSTER_RADIUS
+
+    allowed = set()
+    for (gx, gy) in candidates:
+        for (cx, cy) in centers:
+            dx = gx - cx
+            dy = gy - cy
+            if dx * dx + dy * dy <= r2:
+                allowed.add((gx, gy))
+                break
+
+    if not allowed:
+        allowed = set(candidates)
+
+    for (gx, gy) in allowed:
+        if rng.random() < BUSH_DENSITY:
+            bushes[gx][gy] = True
+            fruit[gx][gy] = True
+            last_harvest_time[gx][gy] = -1e9
+            bush_positions.append((gx, gy))
+
+
+def reset_bush_memory():
+    global bush_known, bush_last_seen_time, bush_last_seen_fruit, bush_last_harvest_time
+    global bush_last_empty_time, bush_last_checked_empty_time, respawn_estimate_sec
+    global respawn_lower_bound
+    bush_known = [[False for _ in range(tilesY)] for _ in range(tilesX)]
+    bush_last_seen_time = [[-1e9 for _ in range(tilesY)] for _ in range(tilesX)]
+    bush_last_seen_fruit = [[False for _ in range(tilesY)] for _ in range(tilesX)]
+    bush_last_harvest_time = [[-1e9 for _ in range(tilesY)] for _ in range(tilesX)]
+    bush_last_empty_time = [[-1e9 for _ in range(tilesY)] for _ in range(tilesX)]
+    bush_last_checked_empty_time = [[-1e9 for _ in range(tilesY)] for _ in range(tilesX)]
+    respawn_estimate_sec = None
+    respawn_lower_bound = 0.0
+
+
+def observe_bush_at(cx, cy, game_time):
+    global respawn_estimate_sec, respawn_lower_bound
+    if not bushes[cx][cy]:
+        return
+
+    bush_known[cx][cy] = True
+    bush_last_seen_time[cx][cy] = game_time
+
+    if fruit[cx][cy]:
+        if not bush_last_seen_fruit[cx][cy] and bush_last_empty_time[cx][cy] >= 0.0:
+            sample = game_time - bush_last_empty_time[cx][cy]
+            sample = clamp(sample, 2.0, 300.0)
+            if respawn_estimate_sec is None:
+                respawn_estimate_sec = sample
+            else:
+                respawn_estimate_sec = (
+                    (1.0 - RESPAWN_EMA_ALPHA) * respawn_estimate_sec
+                    + RESPAWN_EMA_ALPHA * sample
+                )
+            if respawn_estimate_sec is not None:
+                respawn_estimate_sec = max(respawn_estimate_sec, respawn_lower_bound)
+        bush_last_seen_fruit[cx][cy] = True
+    else:
+        bush_last_checked_empty_time[cx][cy] = game_time
+        if bush_last_empty_time[cx][cy] >= 0.0:
+            elapsed = game_time - bush_last_empty_time[cx][cy]
+            if elapsed > respawn_lower_bound:
+                respawn_lower_bound = elapsed
+        if bush_last_seen_fruit[cx][cy] or bush_last_empty_time[cx][cy] < 0.0:
+            bush_last_empty_time[cx][cy] = game_time
+        bush_last_seen_fruit[cx][cy] = False
+
+
+def observe_bushes_from_cells(cells, game_time):
+    for (cx, cy) in cells:
+        if in_bounds_cell(cx, cy):
+            observe_bush_at(cx, cy, game_time)
+
+
+def update_fruit_respawn(game_time):
+    for (cx, cy) in bush_positions:
+        if not fruit[cx][cy]:
+            if game_time - last_harvest_time[cx][cy] >= FRUIT_RESPAWN_SEC:
+                fruit[cx][cy] = True
+
+
+def pick_best_forage(dist_known, game_time, hunger, current_cell):
+    best_cell = None
+    best_score = 0.0
+    if hunger <= 0.0:
+        return None, 0.0
+
+    for (cx, cy) in bush_positions:
+        if not bush_known[cx][cy]:
+            continue
+        if dist_known[cx][cy] == -1:
+            continue
+        if (cx, cy) == current_cell:
+            continue
+
+        expected_value = 0.0
+        if bush_last_seen_fruit[cx][cy]:
+            expected_value = 1.0
+        else:
+            if respawn_estimate_sec is not None:
+                estimate = max(respawn_estimate_sec, respawn_lower_bound)
+                if bush_last_checked_empty_time[cx][cy] >= 0.0:
+                    elapsed = game_time - bush_last_checked_empty_time[cx][cy]
+                elif bush_last_empty_time[cx][cy] >= 0.0:
+                    elapsed = game_time - bush_last_empty_time[cx][cy]
+                else:
+                    elapsed = max(0.0, game_time - bush_last_seen_time[cx][cy])
+                expected_value = clamp(elapsed / max(1e-6, estimate), 0.0, 1.0)
+            else:
+                expected_value = 0.0
+
+        if expected_value <= 0.0:
+            continue
+
+        score = FORAGE_WEIGHT * hunger * expected_value / (1.0 + dist_known[cx][cy])
+        if score > best_score:
+            best_score = score
+            best_cell = (cx, cy)
+
+    return best_cell, best_score
+
+
+def pick_frontier_near_home(dist, home_cell, radius):
+    clusters = find_frontier_clusters(dist)
+    best = None
+    best_dist = None
+    for cluster in clusters:
+        rep = pick_cluster_representative(cluster, dist, avoid=None)
+        if rep is None:
+            continue
+        if abs(rep[0] - home_cell[0]) + abs(rep[1] - home_cell[1]) > radius:
+            continue
+        d = dist[rep[0]][rep[1]]
+        if d == -1:
+            continue
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best = rep
+    return best
+
+
+def pick_loiter_target(dist, home_cell, radius, current_cell):
+    best = None
+    best_dist = None
+    hx, hy = home_cell
+    for dx in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
+            cx, cy = hx + dx, hy + dy
+            if not in_bounds_cell(cx, cy):
+                continue
+            if not is_known_open(cx, cy):
+                continue
+            if (cx, cy) == current_cell:
+                continue
+            d = dist[cx][cy]
+            if d == -1:
+                continue
+            if best_dist is None or d < best_dist:
+                best_dist = d
+                best = (cx, cy)
+    return best
+
+
+def pick_nearest_known_bush(dist, current_cell, home_cell=None, radius=None):
+    best = None
+    best_dist = None
+    for (cx, cy) in bush_positions:
+        if not bush_known[cx][cy]:
+            continue
+        if (cx, cy) == current_cell:
+            continue
+        if dist[cx][cy] == -1:
+            continue
+        if home_cell is not None and radius is not None:
+            if abs(cx - home_cell[0]) + abs(cy - home_cell[1]) > radius:
+                continue
+        d = dist[cx][cy]
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best = (cx, cy)
+    return best
+
+
+def pick_nearest_known_open(dist, current_cell, home_cell=None, radius=None, avoid_bushes=False):
+    best = None
+    best_dist = None
+    for gx in range(tilesX):
+        for gy in range(tilesY):
+            if not is_known_open(gx, gy):
+                continue
+            if (gx, gy) == current_cell:
+                continue
+            if avoid_bushes and bushes[gx][gy]:
+                continue
+            if dist[gx][gy] == -1:
+                continue
+            if home_cell is not None and radius is not None:
+                if abs(gx - home_cell[0]) + abs(gy - home_cell[1]) > radius:
+                    continue
+            d = dist[gx][gy]
+            if best_dist is None or d < best_dist:
+                best_dist = d
+                best = (gx, gy)
+    return best
+
+
 # -------------------- Perception --------------------
 
 def cast_and_update(player_pos, player_angle_rad):
@@ -383,7 +647,7 @@ def sense_touch(player_pos):
     return newly_touched
 
 
-def observe_local_3x3(current_cell):
+def observe_local_3x3(current_cell, game_time):
     """Assume the agent fills its cell and 'touches' all surrounding cells."""
     newly_seen = 0
     cx0, cy0 = current_cell
@@ -399,6 +663,8 @@ def observe_local_3x3(current_cell):
             else:
                 subjective[cx][cy] = 0.0
             ever_seen[cx][cy] = True
+            if bushes[cx][cy]:
+                observe_bush_at(cx, cy, game_time)
     return newly_seen
 
 
@@ -716,6 +982,13 @@ def draw_world(screen, cam_x, cam_y, seen_cells):
             if (gx, gy) in seen_cells:
                 pygame.draw.rect(screen, PLAYER_COLOR, rect, 2)
 
+            if ever_seen[gx][gy] and bushes[gx][gy]:
+                pygame.draw.rect(screen, BUSH_COLOR, rect, 1)
+                if fruit[gx][gy]:
+                    cx = sx + TILE_SIZE // 2
+                    cy = sy + TILE_SIZE // 2
+                    pygame.draw.circle(screen, FRUIT_COLOR, (cx, cy), max(2, TILE_SIZE // 4))
+
 
 def draw_target(screen, target_cell, cam_x, cam_y):
     if target_cell is None:
@@ -739,6 +1012,8 @@ def build_world(seed):
     global objective
     objective, main_region = generate_cave(seed)
     reset_belief()
+    init_bushes(main_region, random.Random(seed + 1337))
+    reset_bush_memory()
     return main_region
 
 
@@ -777,6 +1052,7 @@ def main():
 
     target_cell = None
     search_state = "idle"
+    target_kind = None
     stuck_frames = 0
     scan_remaining = 0.0
     scan_dir = 1.0
@@ -790,6 +1066,9 @@ def main():
     frames_no_new = 0
     frames_no_progress = 0
     move_accum = 0.0
+    hunger = 0.0
+    game_time = 0.0
+    last_harvest_cell = None
 
     clock = pygame.time.Clock()
     running = True
@@ -856,9 +1135,19 @@ def main():
     # ---------- Make sure we have some known space before exploration ----------
     seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
     infer_enclosed_voids()
+    observe_bushes_from_cells(seen_cells, game_time)
+    observe_local_3x3(world_to_cell(player_pos[0], player_pos[1]), game_time)
 
     while running:
         dt = clock.tick(60) / 1000.0
+        game_time += dt
+        hunger = min(HUNGER_MAX, hunger + HUNGER_DECAY_PER_SEC * dt)
+        update_fruit_respawn(game_time)
+        if respawn_estimate_sec is None:
+            est_text = "unknown"
+        else:
+            est_text = f"{respawn_estimate_sec:.1f}s"
+        pygame.display.set_caption(f"AI Test | respawn_est={est_text}")
 
         # -------------------- Events --------------------
         for event in pygame.event.get():
@@ -882,6 +1171,7 @@ def main():
 
                 target_cell = None
                 search_state = "idle"
+                target_kind = None
                 stuck_frames = 0
                 scan_remaining = 0.0
                 scan_dir = 1.0
@@ -895,10 +1185,15 @@ def main():
                 frames_no_new = 0
                 frames_no_progress = 0
                 move_accum = 0.0
+                hunger = 0.0
+                game_time = 0.0
+                last_harvest_cell = None
 
                 # refresh known space after reset
                 seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
                 infer_enclosed_voids()
+                observe_bushes_from_cells(seen_cells, game_time)
+                observe_local_3x3(world_to_cell(player_pos[0], player_pos[1]), game_time)
 
             # Manual click target overrides exploration
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -910,6 +1205,7 @@ def main():
                 if in_bounds_cell(cx, cy):
                     target_cell = (cx, cy)
                     search_state = "searching"
+                    target_kind = None
                     stuck_frames = 0
                     scan_remaining = 0.0
                     scan_dir = 1.0
@@ -922,11 +1218,13 @@ def main():
                     frames_no_new = 0
                     frames_no_progress = 0
                     move_accum = 0.0
+                    last_harvest_cell = None
 
         # -------------------- Perception FIRST (so frontiers exist) --------------------
         seen_cells, newly_seen = cast_and_update(player_pos, player_angle)
         infer_enclosed_voids()
-        newly_seen += observe_local_3x3(world_to_cell(player_pos[0], player_pos[1]))
+        observe_bushes_from_cells(seen_cells, game_time)
+        newly_seen += observe_local_3x3(world_to_cell(player_pos[0], player_pos[1]), game_time)
         if newly_seen > 0:
             frames_no_new = 0
         else:
@@ -958,6 +1256,7 @@ def main():
             start_scan("reached_or_unreachable")
             search_state = "scanning"
             target_cell = None
+            target_kind = None
             is_scanning = scan_remaining > 0.0
 
         if is_scanning:
@@ -992,6 +1291,7 @@ def main():
 
         if (not is_scanning) and (frames_no_new >= NO_NEW_FRAMES or frames_no_progress >= NO_PROGRESS_FRAMES):
             target_cell = None
+            target_kind = None
             search_state = "unreachable"
             start_scan("stale")
             if scan_remaining > 0.0:
@@ -999,15 +1299,86 @@ def main():
             frames_no_new = 0
             frames_no_progress = 0
 
-        # -------------------- Auto Exploration Trigger --------------------
+        # -------------------- Auto Target Selection (Forage vs Frontier) --------------------
         if (not is_scanning) and (target_cell is None or search_state in ("idle", "reached", "unreachable")):
-            exp = pick_exploration_target_from_dist(current_cell, dist_known)
-            if exp is not None:
-                target_cell = exp
+            hunger_ratio = hunger / max(1e-6, HUNGER_MAX)
+            satiety = 1.0 - hunger_ratio
+            known_bushes = [(bx, by) for (bx, by) in bush_positions if bush_known[bx][by]]
+            home_cell = None
+            if last_harvest_cell is not None:
+                home_cell = last_harvest_cell
+            elif known_bushes:
+                avg_x = sum(b[0] for b in known_bushes) / len(known_bushes)
+                avg_y = sum(b[1] for b in known_bushes) / len(known_bushes)
+                home_cell = min(
+                    known_bushes,
+                    key=lambda b: (b[0] - avg_x) ** 2 + (b[1] - avg_y) ** 2
+                )
+            home_radius = HOME_RADIUS + int(HOME_RADIUS_EXTRA * satiety)
+
+            forage_cell, forage_score = pick_best_forage(dist_known, game_time, hunger, current_cell)
+            no_forage = forage_cell is None
+            frontier_cell = pick_exploration_target_from_dist(current_cell, dist_known)
+            frontier_score = 0.0
+            if frontier_cell is not None:
+                frontier_score = FRONTIER_WEIGHT / (1.0 + dist_known[frontier_cell[0]][frontier_cell[1]])
+                if home_cell is not None:
+                    if no_forage:
+                        home_radius = HOME_RADIUS + HOME_RADIUS_EXTRA
+                    near_frontier = pick_frontier_near_home(dist_known, home_cell, home_radius)
+                    if near_frontier is not None:
+                        frontier_cell = near_frontier
+                        frontier_score = FRONTIER_WEIGHT / (1.0 + dist_known[frontier_cell[0]][frontier_cell[1]])
+                    home_dist = abs(frontier_cell[0] - home_cell[0]) + abs(frontier_cell[1] - home_cell[1])
+                    if home_dist > home_radius:
+                        if no_forage:
+                            far_mult = 1.0
+                        else:
+                            far_mult = HOME_FAR_MULT + (1.0 - HOME_FAR_MULT) * satiety
+                        frontier_score *= far_mult
+                frontier_score *= (1.0 + satiety * FRONTIER_SATIETY_BONUS)
+                if known_bushes:
+                    frontier_score *= EXPLORE_WHEN_BUSHES_MULT
+
+            if forage_cell is not None and (hunger >= FORAGE_PRIORITY_HUNGER or forage_score > frontier_score):
+                target_cell = forage_cell
+                target_kind = "forage"
                 search_state = "searching"
                 stuck_frames = 0
+            elif frontier_cell is not None:
+                target_cell = frontier_cell
+                target_kind = "frontier"
+                search_state = "searching"
+                stuck_frames = 0
+            elif home_cell is not None:
+                loiter = pick_loiter_target(dist_known, home_cell, LOITER_RADIUS, current_cell)
+                if loiter is not None:
+                    target_cell = loiter
+                    target_kind = "home"
+                    search_state = "searching"
+                    stuck_frames = 0
+                else:
+                    patrol = None
+                    if not no_forage:
+                        patrol = pick_nearest_known_bush(dist_known, current_cell, home_cell, home_radius)
+                    if patrol is None:
+                        patrol = pick_nearest_known_open(
+                            dist_known, current_cell, home_cell, home_radius, avoid_bushes=True
+                        )
+                    if patrol is None:
+                        patrol = pick_nearest_known_open(dist_known, current_cell, None, None, avoid_bushes=True)
+                    if patrol is not None:
+                        target_cell = patrol
+                        target_kind = "home"
+                        search_state = "searching"
+                        stuck_frames = 0
+                    else:
+                        target_cell = None
+                        target_kind = None
+                        search_state = "idle"
             else:
                 target_cell = None
+                target_kind = None
                 search_state = "idle"
 
         # -------------------- Planning (use known-open BFS) --------------------
@@ -1081,6 +1452,7 @@ def main():
                         last_blocked_cell = next_cell
                         stuck_frames = 0
                         target_cell = None
+                        target_kind = None
                         search_state = "unreachable"
                         start_scan("stuck")
                         if scan_remaining > 0.0:
@@ -1088,6 +1460,24 @@ def main():
         elif not is_scanning:
             # Idle scan: rotate in place to reveal nearby space and seed frontiers.
             player_angle = (player_angle + ROT_SPEED * dt) % (2 * math.pi)
+
+        # -------------------- Forage / Harvest --------------------
+        current_cell_after = world_to_cell(player_pos[0], player_pos[1])
+        if target_kind == "forage" and target_cell is not None and current_cell_after == target_cell:
+            if bushes[current_cell_after[0]][current_cell_after[1]] and fruit[current_cell_after[0]][current_cell_after[1]]:
+                fruit[current_cell_after[0]][current_cell_after[1]] = False
+                last_harvest_time[current_cell_after[0]][current_cell_after[1]] = game_time
+                bush_known[current_cell_after[0]][current_cell_after[1]] = True
+                bush_last_seen_time[current_cell_after[0]][current_cell_after[1]] = game_time
+                bush_last_harvest_time[current_cell_after[0]][current_cell_after[1]] = game_time
+                bush_last_seen_fruit[current_cell_after[0]][current_cell_after[1]] = False
+                bush_last_empty_time[current_cell_after[0]][current_cell_after[1]] = game_time
+                bush_last_checked_empty_time[current_cell_after[0]][current_cell_after[1]] = game_time
+                hunger = max(0.0, hunger - HUNGER_EAT_AMOUNT)
+                last_harvest_cell = current_cell_after
+            target_cell = None
+            target_kind = None
+            search_state = "idle"
 
         # -------------------- Render --------------------
         cam_x = clamp(player_pos[0] - WIDTH / 2, 0, WORLD_W - WIDTH)
