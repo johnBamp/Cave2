@@ -34,11 +34,11 @@ def is_wall_cell(cfg: Config, state, cx: int, cy: int) -> bool:
     return state.objective[cx][cy] == 1
 
 
-def is_confirmed_wall(cfg: Config, state, cx: int, cy: int) -> bool:
+def is_confirmed_wall(cfg: Config, agent, cx: int, cy: int) -> bool:
     if cx == 0 or cy == 0 or cx == cfg.tiles_x - 1 or cy == cfg.tiles_y - 1:
         return True
-    return state.ever_seen[cx][cy] and state.subjective[cx][cy] >= cfg.wall_conf_thresh
+    return agent.ever_seen[cx][cy] and agent.subjective[cx][cy] >= cfg.wall_conf_thresh
 
 
-def is_known_open(cfg: Config, state, cx: int, cy: int) -> bool:
-    return state.ever_seen[cx][cy] and state.subjective[cx][cy] < cfg.wall_conf_thresh
+def is_known_open(cfg: Config, agent, cx: int, cy: int) -> bool:
+    return agent.ever_seen[cx][cy] and agent.subjective[cx][cy] < cfg.wall_conf_thresh

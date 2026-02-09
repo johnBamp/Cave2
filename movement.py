@@ -6,7 +6,7 @@ from config import Config
 from grid import in_bounds_cell, is_known_open, is_wall_cell
 
 
-def bfs_known_open(cfg: Config, state, start):
+def bfs_known_open(cfg: Config, agent, start):
     dist = [[-1 for _ in range(cfg.tiles_y)] for _ in range(cfg.tiles_x)]
     parent = [[None for _ in range(cfg.tiles_y)] for _ in range(cfg.tiles_x)]
     q = deque()
@@ -23,7 +23,7 @@ def bfs_known_open(cfg: Config, state, start):
                 continue
             if dist[nx][ny] != -1:
                 continue
-            if not is_known_open(cfg, state, nx, ny):
+            if not is_known_open(cfg, agent, nx, ny):
                 continue
             dist[nx][ny] = dist[x][y] + 1
             parent[nx][ny] = (x, y)

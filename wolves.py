@@ -16,6 +16,7 @@ class Wolf:
     vel: tuple[float, float]
     speed: float
     alive: bool
+    respawn_timer: float
     target_cell: tuple[int, int] | None
     path: list[tuple[int, int]]
     move_accum: float
@@ -45,6 +46,7 @@ def spawn_wolves(cfg: Config, objective, main_region, rng: random.Random) -> lis
                 vel=(0.0, 0.0),
                 speed=cfg.wolf_speed,
                 alive=True,
+                respawn_timer=0.0,
                 target_cell=None,
                 path=[],
                 move_accum=0.0,
@@ -63,7 +65,8 @@ def wolf_can_see_player(cfg: Config, objective, wolf: Wolf, player_pos) -> bool:
     return has_line_of_sight(cfg, objective, wolf.pos, player_pos)
 
 
-def update_wolves(cfg: Config, state, dt: float, rng: random.Random, player_pos) -> None:
+def update_wolves(cfg: Config, state, dt: float, rng: random.Random, agents) -> None:
+    targets = [agent for agent in agents if not getattr(agent, "downed", False)]
     for wolf in state.wolves:
         if not wolf.alive:
             continue
@@ -72,19 +75,30 @@ def update_wolves(cfg: Config, state, dt: float, rng: random.Random, player_pos)
         wolf.attack_cooldown = max(0.0, wolf.attack_cooldown - dt)
         current_cell = world_to_cell(cfg, wolf.pos[0], wolf.pos[1])
 
-        dist_to_player = math.hypot(wolf.pos[0] - player_pos[0], wolf.pos[1] - player_pos[1])
+        target_agent = None
+        best_dist = None
+        for agent in targets:
+            dist = math.hypot(wolf.pos[0] - agent.pos[0], wolf.pos[1] - agent.pos[1])
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                target_agent = agent
+
+        if target_agent is None:
+            continue
+
+        dist_to_player = math.hypot(wolf.pos[0] - target_agent.pos[0], wolf.pos[1] - target_agent.pos[1])
         if dist_to_player <= cfg.wolf_attack_range_tiles * cfg.tile_size:
             wolf.path = []
             wolf.target_cell = None
             continue
         can_hear = dist_to_player <= cfg.wolf_hearing_range_tiles * cfg.tile_size
         can_see = dist_to_player <= cfg.wolf_sight_range_tiles * cfg.tile_size and has_line_of_sight(
-            cfg, state.objective, wolf.pos, player_pos
+            cfg, state.objective, wolf.pos, target_agent.pos
         )
 
         if can_see or can_hear:
             if wolf.repath_timer >= cfg.wolf_repath_sec or not wolf.path:
-                target_cell = world_to_cell(cfg, player_pos[0], player_pos[1])
+                target_cell = world_to_cell(cfg, target_agent.pos[0], target_agent.pos[1])
                 if not in_bounds_cell(cfg, target_cell[0], target_cell[1]) or state.objective[
                     target_cell[0]
                 ][target_cell[1]] == 1:
@@ -125,16 +139,16 @@ def update_wolves(cfg: Config, state, dt: float, rng: random.Random, player_pos)
                 break
 
 
-def wolf_attack(cfg: Config, state, wolf: Wolf, dt: float) -> None:
+def wolf_attack(cfg: Config, wolf: Wolf, agent) -> None:
     if not wolf.alive:
         return
-    dist = math.hypot(wolf.pos[0] - state.player_pos[0], wolf.pos[1] - state.player_pos[1])
+    dist = math.hypot(wolf.pos[0] - agent.pos[0], wolf.pos[1] - agent.pos[1])
     if dist > cfg.wolf_attack_range_tiles * cfg.tile_size:
         return
     if wolf.attack_cooldown > 0.0:
         return
     damage = cfg.wolf_dps * cfg.wolf_attack_cooldown
-    state.player_hp = max(0.0, state.player_hp - damage)
+    agent.hp = max(0.0, agent.hp - damage)
     wolf.attack_cooldown = cfg.wolf_attack_cooldown
 
 
@@ -160,4 +174,5 @@ def respawn_wolf(cfg: Config, state, wolf: Wolf, rng: random.Random, avoid_cell=
     wolf.repath_timer = 0.0
     wolf.hp = cfg.wolf_max_hp
     wolf.attack_cooldown = 0.0
+    wolf.respawn_timer = 0.0
     wolf.alive = True

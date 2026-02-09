@@ -11,6 +11,7 @@ class Config:
     # Window
     width: int
     height: int
+    cam_speed: float
 
     # World
     tiles_x: int
@@ -28,6 +29,7 @@ class Config:
     bush_color: tuple[int, int, int]
     fruit_color: tuple[int, int, int]
     show_player_fov: bool
+    show_subjective_debug: bool
 
     # Raycast
     fov_deg: float
@@ -66,6 +68,7 @@ class Config:
     frontier_satiety_bonus: float
 
     # Animals
+    enable_animals: bool
     animal_count: int
     animal_speed: float
     animal_turn_chance: float
@@ -89,6 +92,7 @@ class Config:
     sound_confidence: float
 
     # Wolves
+    enable_wolves: bool
     wolf_count: int
     wolf_speed: float
     wolf_wander_radius: int
@@ -127,6 +131,27 @@ class Config:
     animal_color: tuple[int, int, int]
     animal_seen_only: bool
 
+    # Agents / Communication
+    agent_colors: list[tuple[int, int, int]]
+    comm_enabled: bool
+    comm_calls: int
+    comm_grid_x: int
+    comm_grid_y: int
+    comm_period_sec: float
+    comm_eps: float
+    comm_lr: float
+    comm_merge_alpha: float
+    comm_sound_level: float
+    show_comm_debug: bool
+    regroup_distance_tiles: int
+    sync_distance_tiles: int
+    separate_distance_tiles: int
+    separate_weight: float
+    sync_text_sec: float
+    meet_interval_sec: float
+    meet_window_sec: float
+    explore_bias_weight: float
+
     # Cave generation
     fill_prob: float
     smooth_passes: int
@@ -151,6 +176,7 @@ def load_config() -> Config:
         # Window
         width=cfg.WIDTH,
         height=cfg.HEIGHT,
+        cam_speed=cfg.CAM_SPEED,
 
         # World
         tiles_x=cfg.TILES_X,
@@ -168,6 +194,7 @@ def load_config() -> Config:
         bush_color=cfg.BUSH_COLOR,
         fruit_color=cfg.FRUIT_COLOR,
         show_player_fov=cfg.SHOW_PLAYER_FOV,
+        show_subjective_debug=cfg.SHOW_SUBJECTIVE_DEBUG,
 
         # Raycast
         fov_deg=cfg.FOV_DEG,
@@ -206,6 +233,7 @@ def load_config() -> Config:
         frontier_satiety_bonus=cfg.FRONTIER_SATIETY_BONUS,
 
         # Animals
+        enable_animals=cfg.ENABLE_ANIMALS,
         animal_count=cfg.ANIMAL_COUNT,
         animal_speed=cfg.ANIMAL_SPEED,
         animal_turn_chance=cfg.ANIMAL_TURN_CHANCE,
@@ -229,6 +257,7 @@ def load_config() -> Config:
         sound_confidence=cfg.SOUND_CONFIDENCE,
 
         # Wolves
+        enable_wolves=cfg.ENABLE_WOLVES,
         wolf_count=cfg.WOLF_COUNT,
         wolf_speed=cfg.WOLF_SPEED,
         wolf_wander_radius=cfg.WOLF_WANDER_RADIUS,
@@ -266,6 +295,27 @@ def load_config() -> Config:
         hunt_catch_dist=cfg.HUNT_CATCH_DIST,
         animal_color=cfg.ANIMAL_COLOR,
         animal_seen_only=cfg.ANIMAL_SEEN_ONLY,
+
+        # Agents / Communication
+        agent_colors=list(cfg.AGENT_COLORS),
+        comm_enabled=cfg.COMM_ENABLED,
+        comm_calls=cfg.COMM_CALLS,
+        comm_grid_x=cfg.COMM_GRID_X,
+        comm_grid_y=cfg.COMM_GRID_Y,
+        comm_period_sec=cfg.COMM_PERIOD_SEC,
+        comm_eps=cfg.COMM_EPS,
+        comm_lr=cfg.COMM_LR,
+        comm_merge_alpha=cfg.COMM_MERGE_ALPHA,
+        comm_sound_level=cfg.COMM_SOUND_LEVEL,
+        show_comm_debug=cfg.SHOW_COMM_DEBUG,
+        regroup_distance_tiles=cfg.REGROUP_DISTANCE_TILES,
+        sync_distance_tiles=cfg.SYNC_DISTANCE_TILES,
+        separate_distance_tiles=cfg.SEPARATE_DISTANCE_TILES,
+        separate_weight=cfg.SEPARATE_WEIGHT,
+        sync_text_sec=cfg.SYNC_TEXT_SEC,
+        meet_interval_sec=cfg.MEET_INTERVAL_SEC,
+        meet_window_sec=cfg.MEET_WINDOW_SEC,
+        explore_bias_weight=cfg.EXPLORE_BIAS_WEIGHT,
 
         # Cave generation
         fill_prob=cfg.FILL_PROB,

@@ -10,13 +10,16 @@ class SoundEvent:
     base_volume: float
     source_id: int | None
     kind: str
+    payload: int | None = None
 
 
-def emit_sound(state, pos, base_volume: float, source_id=None, kind="generic") -> None:
-    state.sound_events.append(SoundEvent(pos=pos, base_volume=base_volume, source_id=source_id, kind=kind))
+def emit_sound(state, pos, base_volume: float, source_id=None, kind="generic", payload=None) -> None:
+    state.sound_events.append(
+        SoundEvent(pos=pos, base_volume=base_volume, source_id=source_id, kind=kind, payload=payload)
+    )
 
 
-def process_hearing(cfg, state, listener_pos):
+def process_hearing(cfg, state, listener_pos, ignore_source_id=None):
     if not state.sound_events:
         return False, None, 0.0, None
 
@@ -30,6 +33,8 @@ def process_hearing(cfg, state, listener_pos):
     strongest = None
 
     for ev in state.sound_events:
+        if ignore_source_id is not None and ev.source_id == ignore_source_id:
+            continue
         dx = ev.pos[0] - listener_pos[0]
         dy = ev.pos[1] - listener_pos[1]
         dist = math.hypot(dx, dy)

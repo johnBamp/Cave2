@@ -130,16 +130,31 @@ def pick_best_forage(cfg: Config, state, dist_known, game_time: float, hunger: f
             expected_value = 1.0
         else:
             if state.respawn_estimate_sec is not None:
-                estimate = max(state.respawn_estimate_sec, state.respawn_lower_bound)
+                estimate = max(state.respawn_estimate_sec, state.respawn_lower_bound, 5.0)
                 if state.bush_last_checked_empty_time[cx][cy] >= 0.0:
                     elapsed = game_time - state.bush_last_checked_empty_time[cx][cy]
                 elif state.bush_last_empty_time[cx][cy] >= 0.0:
                     elapsed = game_time - state.bush_last_empty_time[cx][cy]
                 else:
                     elapsed = max(0.0, game_time - state.bush_last_seen_time[cx][cy])
-                expected_value = clamp(elapsed / max(1e-6, estimate), 0.0, 1.0)
+                # Don't revisit too early; ramp after 60% of estimate
+                if elapsed < 0.6 * estimate:
+                    expected_value = 0.0
+                else:
+                    span = max(1e-6, 0.4 * estimate)
+                    expected_value = clamp((elapsed - 0.6 * estimate) / span, 0.0, 1.0)
             else:
-                expected_value = 0.0
+                if state.bush_last_checked_empty_time[cx][cy] >= 0.0:
+                    elapsed = game_time - state.bush_last_checked_empty_time[cx][cy]
+                elif state.bush_last_empty_time[cx][cy] >= 0.0:
+                    elapsed = game_time - state.bush_last_empty_time[cx][cy]
+                else:
+                    elapsed = max(0.0, game_time - state.bush_last_seen_time[cx][cy])
+                fallback = max(8.0, state.respawn_lower_bound, 1.0)
+                if elapsed < fallback:
+                    expected_value = 0.0
+                else:
+                    expected_value = cfg.min_bush_attraction * clamp((elapsed - fallback) / fallback, 0.0, 1.0)
 
         if expected_value <= 0.0:
             continue

@@ -4,19 +4,19 @@ from config import Config
 from grid import in_bounds_cell, is_known_open
 
 
-def is_frontier_cell(cfg: Config, state, cx: int, cy: int) -> bool:
+def is_frontier_cell(cfg: Config, agent, cx: int, cy: int) -> bool:
     if not in_bounds_cell(cfg, cx, cy):
         return False
-    if not is_known_open(cfg, state, cx, cy):
+    if not is_known_open(cfg, agent, cx, cy):
         return False
     for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
         nx, ny = cx + dx, cy + dy
-        if in_bounds_cell(cfg, nx, ny) and not state.ever_seen[nx][ny]:
+        if in_bounds_cell(cfg, nx, ny) and not agent.ever_seen[nx][ny]:
             return True
     return False
 
 
-def find_frontier_clusters(cfg: Config, state, dist):
+def find_frontier_clusters(cfg: Config, agent, dist):
     visited = [[False for _ in range(cfg.tiles_y)] for _ in range(cfg.tiles_x)]
     clusters = []
 
@@ -26,7 +26,7 @@ def find_frontier_clusters(cfg: Config, state, dist):
                 continue
             if dist[gx][gy] == -1:
                 continue
-            if not is_frontier_cell(cfg, state, gx, gy):
+            if not is_frontier_cell(cfg, agent, gx, gy):
                 continue
 
             q = [(gx, gy)]
@@ -44,7 +44,7 @@ def find_frontier_clusters(cfg: Config, state, dist):
                         continue
                     if dist[nx][ny] == -1:
                         continue
-                    if is_frontier_cell(cfg, state, nx, ny):
+                    if is_frontier_cell(cfg, agent, nx, ny):
                         visited[nx][ny] = True
                         q.append((nx, ny))
 
@@ -61,8 +61,8 @@ def pick_cluster_representative(cluster, dist, avoid=None):
     return min(cluster, key=lambda c: dist[c[0]][c[1]])
 
 
-def pick_exploration_target_from_dist(cfg: Config, state, current_cell, dist):
-    clusters = find_frontier_clusters(cfg, state, dist)
+def pick_exploration_target_from_dist(cfg: Config, agent, current_cell, dist):
+    clusters = find_frontier_clusters(cfg, agent, dist)
     if not clusters:
         return None
 
@@ -81,8 +81,8 @@ def pick_exploration_target_from_dist(cfg: Config, state, current_cell, dist):
     return min(candidates, key=lambda item: item[0])[1]
 
 
-def pick_frontier_near_home(cfg: Config, state, dist, home_cell, radius: int):
-    clusters = find_frontier_clusters(cfg, state, dist)
+def pick_frontier_near_home(cfg: Config, agent, dist, home_cell, radius: int):
+    clusters = find_frontier_clusters(cfg, agent, dist)
     best = None
     best_dist = None
     for cluster in clusters:
@@ -100,7 +100,7 @@ def pick_frontier_near_home(cfg: Config, state, dist, home_cell, radius: int):
     return best
 
 
-def pick_loiter_target(cfg: Config, state, dist, home_cell, radius: int, current_cell):
+def pick_loiter_target(cfg: Config, agent, dist, home_cell, radius: int, current_cell):
     best = None
     best_dist = None
     hx, hy = home_cell
@@ -109,7 +109,7 @@ def pick_loiter_target(cfg: Config, state, dist, home_cell, radius: int, current
             cx, cy = hx + dx, hy + dy
             if not in_bounds_cell(cfg, cx, cy):
                 continue
-            if not is_known_open(cfg, state, cx, cy):
+            if not is_known_open(cfg, agent, cx, cy):
                 continue
             if (cx, cy) == current_cell:
                 continue
@@ -122,7 +122,7 @@ def pick_loiter_target(cfg: Config, state, dist, home_cell, radius: int, current
     return best
 
 
-def pick_nearest_known_bush(cfg: Config, state, dist, current_cell, home_cell=None, radius=None):
+def pick_nearest_known_bush(cfg: Config, state, agent, dist, current_cell, home_cell=None, radius=None):
     best = None
     best_dist = None
     for (cx, cy) in state.bush_positions:
@@ -142,12 +142,12 @@ def pick_nearest_known_bush(cfg: Config, state, dist, current_cell, home_cell=No
     return best
 
 
-def pick_nearest_known_open(cfg: Config, state, dist, current_cell, home_cell=None, radius=None, avoid_bushes=False):
+def pick_nearest_known_open(cfg: Config, state, agent, dist, current_cell, home_cell=None, radius=None, avoid_bushes=False):
     best = None
     best_dist = None
     for gx in range(cfg.tiles_x):
         for gy in range(cfg.tiles_y):
-            if not is_known_open(cfg, state, gx, gy):
+            if not is_known_open(cfg, agent, gx, gy):
                 continue
             if (gx, gy) == current_cell:
                 continue
